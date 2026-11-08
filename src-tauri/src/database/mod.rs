@@ -243,8 +243,11 @@ pub struct GameRow {
     pub cover_path: Option<String>,
     pub platform: String,
     pub executable_path: String,
+    pub arguments: Option<String>,
     pub rom_iso_path: Option<String>,
     pub is_emulated: bool,
+    pub play_time_minutes: i64,
+    pub last_played: Option<String>,
 }
 
 /// Guarda los juegos detectados. Los que ya no aparecen quedan como no instalados.
@@ -334,8 +337,11 @@ pub async fn list_games(pool: &SqlitePool) -> Result<Vec<GameRow>, sqlx::Error> 
             g.cover_path,
             COALESCE(p.name, 'custom') AS platform,
             g.executable_path,
+            g.arguments,
             g.rom_iso_path,
-            g.is_emulated
+            g.is_emulated,
+            COALESCE(g.play_time_minutes, 0) AS play_time_minutes,
+            g.last_played
         FROM games g
         LEFT JOIN sagas s ON s.id = g.saga_id
         LEFT JOIN platforms p ON p.id = g.platform_id
@@ -357,12 +363,159 @@ pub async fn list_games(pool: &SqlitePool) -> Result<Vec<GameRow>, sqlx::Error> 
             cover_path: row.try_get("cover_path")?,
             platform: row.try_get("platform")?,
             executable_path: row.try_get("executable_path")?,
+            arguments: row.try_get("arguments")?,
             rom_iso_path: row.try_get("rom_iso_path")?,
             is_emulated: row.try_get::<i64, _>("is_emulated")? != 0,
+            play_time_minutes: row.try_get("play_time_minutes")?,
+            last_played: row.try_get("last_played")?,
         });
     }
 
     Ok(games)
+}
+
+/// Actualiza manualmente un juego existente
+pub async fn update_game(
+    pool: &SqlitePool,
+    id: i64,
+    name: &str,
+    saga: Option<&str>,
+    release_year: Option<i32>,
+    console: Option<&str>,
+    executable_path: &str,
+    arguments: Option<&str>,
+    cover_path: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let saga_id: Option<i64> = match saga {
+        Some(s) if !s.trim().is_empty() => {
+            sqlx::query("INSERT OR IGNORE INTO sagas (name) VALUES (?1)")
+                .bind(s.trim())
+                .execute(pool)
+                .await?;
+            sqlx::query_scalar("SELECT id FROM sagas WHERE name = ?1")
+                .bind(s.trim())
+                .fetch_optional(pool)
+                .await?
+        }
+        _ => None,
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE games
+        SET name = ?1,
+            saga_id = ?2,
+            release_year = ?3,
+            console = ?4,
+            executable_path = ?5,
+            arguments = ?6,
+            cover_path = ?7,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?8
+        "#,
+    )
+    .bind(name)
+    .bind(saga_id)
+    .bind(release_year)
+    .bind(console)
+    .bind(executable_path)
+    .bind(arguments)
+    .bind(cover_path)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Añade un juego de forma manual
+pub async fn add_custom_game(
+    pool: &SqlitePool,
+    name: &str,
+    platform: &str,
+    executable_path: &str,
+    arguments: Option<&str>,
+    saga: Option<&str>,
+    console: Option<&str>,
+    release_year: Option<i32>,
+    cover_path: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let platform_id: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM platforms WHERE name = ?1")
+            .bind(platform)
+            .fetch_optional(pool)
+            .await?;
+
+    let saga_id: Option<i64> = match saga {
+        Some(s) if !s.trim().is_empty() => {
+            sqlx::query("INSERT OR IGNORE INTO sagas (name) VALUES (?1)")
+                .bind(s.trim())
+                .execute(pool)
+                .await?;
+            sqlx::query_scalar("SELECT id FROM sagas WHERE name = ?1")
+                .bind(s.trim())
+                .fetch_optional(pool)
+                .await?
+        }
+        _ => None,
+    };
+
+    let uuid_source = format!("custom|{}|{}", name, executable_path);
+    let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, uuid_source.as_bytes()).to_string();
+
+    let id = sqlx::query(
+        r#"
+        INSERT INTO games (
+            uuid, name, saga_id, platform_id, executable_path, arguments,
+            is_emulated, console, release_year, cover_path, installed, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, 1, CURRENT_TIMESTAMP)
+        "#,
+    )
+    .bind(&uuid)
+    .bind(name)
+    .bind(saga_id)
+    .bind(platform_id)
+    .bind(executable_path)
+    .bind(arguments)
+    .bind(console)
+    .bind(release_year)
+    .bind(cover_path)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+
+    Ok(id)
+}
+
+/// Registra tiempo de sesión jugado
+pub async fn record_playtime(
+    pool: &SqlitePool,
+    game_id: i64,
+    minutes_played: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE games
+        SET play_time_minutes = COALESCE(play_time_minutes, 0) + ?1,
+            last_played = CURRENT_TIMESTAMP
+        WHERE id = ?2
+        "#,
+    )
+    .bind(minutes_played)
+    .bind(game_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Elimina o desinstala un juego de la biblioteca
+pub async fn delete_game(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM games WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Inicializa la base de datos (idempotente).

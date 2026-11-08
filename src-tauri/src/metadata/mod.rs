@@ -71,7 +71,7 @@ impl MetadataClient {
         Ok(None)
     }
     
-    pub async fn download_cover(&self, url: &str, game_id: i32) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub async fn download_cover(&self, url: &str, game_id: i64) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let response = self.client.get(url).send().await?;
         let bytes = response.bytes().await?;
         

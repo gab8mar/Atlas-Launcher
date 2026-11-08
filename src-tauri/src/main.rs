@@ -33,6 +33,10 @@ fn main() {
             commands::get_games_by_saga,
             commands::launch_game,
             commands::launch_emulated_game,
+            commands::update_game,
+            commands::add_custom_game,
+            commands::delete_game,
+            commands::save_game_cover,
         ])
         .setup(|app| {
             init_logging();

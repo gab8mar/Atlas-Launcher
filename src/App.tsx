@@ -3,14 +3,20 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import {
   BookOpen,
   Cpu,
+  Edit3,
   FolderOpen,
   Gamepad2,
+  Heart,
+  Image as ImageIcon,
   LayoutGrid,
   List as ListIcon,
   Play,
+  Plus,
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
+  X,
 } from 'lucide-react';
 import { FixedSizeList as List } from 'react-window';
 
@@ -25,8 +31,11 @@ interface Game {
   cover_path: string | null;
   platform: string;
   executable_path: string;
+  arguments: string | null;
   rom_iso_path: string | null;
   is_emulated: boolean;
+  play_time_minutes: number;
+  last_played: string | null;
 }
 
 interface SagaGroup {
@@ -78,96 +87,519 @@ function coverSource(path: string | null): string | null {
 function groupBySaga(games: Game[]): SagaGroup[] {
   const map = new Map<string, Game[]>();
   for (const game of games) {
-    const key = game.saga || 'Sin saga';
-    if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(game);
+    const saga = game.saga || 'Sin saga';
+    if (!map.has(saga)) {
+      map.set(saga, []);
+    }
+    map.get(saga)!.push(game);
   }
+
+  // Orden cronológico por año de lanzamiento dentro de cada saga
+  for (const list of map.values()) {
+    list.sort((a, b) => {
+      const yearA = a.release_year ?? 9999;
+      const yearB = b.release_year ?? 9999;
+      if (yearA !== yearB) return yearA - yearB;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
   return Array.from(map.entries())
-    .map(([name, list]) => ({
-      name,
-      games: [...list].sort((a, b) => (a.release_year || 0) - (b.release_year || 0)),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .map(([name, list]) => ({ name, games: list }))
+    .sort((a, b) => {
+      if (a.name === 'Sin saga') return 1;
+      if (b.name === 'Sin saga') return -1;
+      return a.name.localeCompare(b.name);
+    });
 }
 
-/* --------------------------- Componentes ------------------------- */
+function posterGradient(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash << 5) - hash + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  const h1 = Math.abs(hash) % 360;
+  const h2 = (h1 + 45) % 360;
+  return `linear-gradient(135deg, hsl(${h1}, 70%, 18%) 0%, hsl(${h2}, 80%, 8%) 100%)`;
+}
 
-function Poster({ game, large = false }: { game: Game; large?: boolean }) {
-  const source = coverSource(game.cover_path);
-  const accent = PLATFORM_COLORS[game.platform] || '#ffffff';
-  const label = PLATFORM_LABELS[game.platform] || game.platform.toUpperCase();
-  const initial = game.name.trim().charAt(0).toUpperCase();
+function formatPlaytime(minutes: number): string {
+  if (!minutes || minutes <= 0) return '0h';
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours === 0) return `${mins}m`;
+  return `${hours}h ${mins}m`;
+}
+
+/* -------------------------- Componentes -------------------------- */
+
+function Poster({ game, className }: { game: Game; className?: string }) {
+  const [imageError, setImageError] = useState(false);
+  const src = coverSource(game.cover_path);
+
+  if (src && !imageError) {
+    return (
+      <img
+        src={src}
+        alt={game.name}
+        onError={() => setImageError(true)}
+        className={`aspect-[2/3] w-full rounded object-cover shadow-lg ${className ?? ''}`}
+      />
+    );
+  }
 
   return (
     <div
-      className={`relative w-full overflow-hidden rounded-lg border border-gray-800 bg-atlas-card ${
-        large ? 'aspect-[2/3]' : 'aspect-[2/3]'
+      style={{ background: posterGradient(game.name) }}
+      className={`relative flex aspect-[2/3] w-full flex-col justify-between overflow-hidden rounded border border-gray-800 p-3 shadow-lg ${
+        className ?? ''
       }`}
     >
-      {source ? (
-        <img
-          src={source}
-          alt={game.name}
-          loading="lazy"
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-        />
-      ) : (
-        <div
-          className="flex h-full w-full flex-col items-center justify-center gap-2"
-          style={{
-            background: `radial-gradient(circle at 50% 20%, ${accent}26, #12121c 70%)`,
-          }}
-        >
-          <span className="font-pixel text-6xl" style={{ color: accent }}>
-            {initial}
-          </span>
-          <span className="px-2 text-center font-mono text-[10px] uppercase tracking-widest text-gray-500">
-            {game.console || 'PC'}
-          </span>
-        </div>
-      )}
-
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-2">
-        <span
-          className="inline-block rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider"
-          style={{ color: accent, borderColor: `${accent}66` }}
-        >
-          {label}
+      <div className="flex items-center justify-between text-gray-500">
+        <Gamepad2 className="h-5 w-5 text-gray-400/60" />
+        <span className="font-mono text-[9px] uppercase tracking-wider text-gray-400">
+          {game.console || 'PC'}
         </span>
+      </div>
+
+      <div>
+        <p className="line-clamp-3 text-xs font-bold leading-tight text-white drop-shadow">
+          {game.name}
+        </p>
+        {game.release_year && (
+          <p className="mt-1 font-mono text-[10px] text-gray-400">{game.release_year}</p>
+        )}
+      </div>
+
+      <div className="font-mono text-[8px] uppercase tracking-widest text-gray-500">
+        {PLATFORM_LABELS[game.platform] || game.platform}
       </div>
     </div>
   );
 }
 
-function GameCard({ game, onLaunch }: { game: Game; onLaunch: (game: Game) => void }) {
+/* -------------------------- Modal Editor ------------------------- */
+
+interface EditModalProps {
+  game: Game | null;
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (updated: Game) => void;
+  onDelete: (id: number) => void;
+}
+
+function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalProps) {
+  const [name, setName] = useState('');
+  const [saga, setSaga] = useState('');
+  const [releaseYear, setReleaseYear] = useState<string>('');
+  const [consoleName, setConsoleName] = useState('');
+  const [executablePath, setExecutablePath] = useState('');
+  const [args, setArgs] = useState('');
+  const [coverPath, setCoverPath] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (game) {
+      setName(game.name);
+      setSaga(game.saga || '');
+      setReleaseYear(game.release_year ? String(game.release_year) : '');
+      setConsoleName(game.console || 'PC');
+      setExecutablePath(game.executable_path || '');
+      setArgs(game.arguments || '');
+      setCoverPath(game.cover_path || '');
+    }
+  }, [game]);
+
+  if (!isOpen || !game) return null;
+
+  async function handleSave() {
+    if (!game) return;
+    setSaving(true);
+    try {
+      const year = releaseYear ? parseInt(releaseYear, 10) : null;
+      await invokeCmd('update_game', {
+        id: game.id,
+        name,
+        saga: saga.trim() ? saga.trim() : null,
+        releaseYear: isNaN(year as number) ? null : year,
+        console: consoleName.trim() ? consoleName.trim() : null,
+        executablePath,
+        arguments: args.trim() ? args.trim() : null,
+        coverPath: coverPath.trim() ? coverPath.trim() : null,
+      });
+
+      onSave({
+        ...game,
+        name,
+        saga: saga.trim() ? saga.trim() : null,
+        release_year: isNaN(year as number) ? null : year,
+        console: consoleName.trim() ? consoleName.trim() : null,
+        executable_path: executablePath,
+        arguments: args.trim() ? args.trim() : null,
+        cover_path: coverPath.trim() ? coverPath.trim() : null,
+      });
+      onClose();
+    } catch (err) {
+      alert(`Error al guardar: ${err}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!confirm(`¿Eliminar "${game.name}" de la biblioteca de Atlas Launcher?`)) return;
+    try {
+      await invokeCmd('delete_game', { id: game.id });
+      onDelete(game.id);
+      onClose();
+    } catch (err) {
+      alert(`Error al eliminar: ${err}`);
+    }
+  }
+
   return (
-    <button
-      type="button"
-      onClick={() => onLaunch(game)}
-      className="group flex flex-col text-left focus:outline-none"
-      title={game.executable_path || game.name}
-    >
-      <Poster game={game} />
-      <h3 className="mt-2 line-clamp-2 text-sm font-bold leading-tight text-white group-hover:text-neon-cyan">
-        {game.name}
-      </h3>
-      <p className="mt-1 font-mono text-[11px] text-gray-400">
-        {game.release_year ?? '—'} · {game.console || 'PC'}
-      </p>
-    </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+      <div className="w-full max-w-xl rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Edit3 className="h-5 w-5 text-neon-pink" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              Editar Registro de Juego
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+              Nombre del Juego
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="atlas-input mt-1 w-full text-sm"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Colección / Saga (ej. Zelda, AC)
+              </label>
+              <input
+                type="text"
+                value={saga}
+                onChange={(e) => setSaga(e.target.value)}
+                placeholder="Sin saga"
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Año de Lanzamiento
+              </label>
+              <input
+                type="number"
+                value={releaseYear}
+                onChange={(e) => setReleaseYear(e.target.value)}
+                placeholder="2024"
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Consola / Plataforma
+              </label>
+              <input
+                type="text"
+                value={consoleName}
+                onChange={(e) => setConsoleName(e.target.value)}
+                placeholder="PC, NES, Switch..."
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Argumentos CLI (Flags)
+              </label>
+              <input
+                type="text"
+                value={args}
+                onChange={(e) => setArgs(e.target.value)}
+                placeholder="-DX11 -fullscreen"
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+              Ruta del Ejecutable o URI Scheme
+            </label>
+            <input
+              type="text"
+              value={executablePath}
+              onChange={(e) => setExecutablePath(e.target.value)}
+              className="atlas-input mt-1 w-full text-xs font-mono"
+            />
+          </div>
+
+          <div>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+              Carátula (URL web o ruta local de imagen)
+            </label>
+            <div className="mt-1 flex gap-2">
+              <input
+                type="text"
+                value={coverPath}
+                onChange={(e) => setCoverPath(e.target.value)}
+                placeholder="https://... o C:\caratula.png"
+                className="atlas-input flex-1 text-xs"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 flex items-center justify-between border-t border-gray-800 pt-4">
+          <button
+            type="button"
+            onClick={handleDelete}
+            className="flex items-center gap-1.5 rounded px-3 py-1.5 font-mono text-xs text-red-400 hover:bg-red-500/10 hover:text-red-300"
+          >
+            <Trash2 className="h-4 w-4" /> Eliminar
+          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-gray-700 px-4 py-2 font-mono text-xs text-gray-400 hover:bg-gray-800 hover:text-white"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="atlas-btn-cyan px-5 py-2 font-mono text-xs disabled:opacity-50"
+            >
+              {saving ? 'Guardando...' : 'Guardar Cambios'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
-/* ------------------------------ App ------------------------------ */
+/* -------------------------- Modal Añadir Manual ------------------- */
 
-function App() {
+interface AddGameModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onAdded: () => void;
+}
+
+function AddGameModal({ isOpen, onClose, onAdded }: AddGameModalProps) {
+  const [name, setName] = useState('');
+  const [executablePath, setExecutablePath] = useState('');
+  const [args, setArgs] = useState('');
+  const [saga, setSaga] = useState('');
+  const [consoleName, setConsoleName] = useState('PC');
+  const [releaseYear, setReleaseYear] = useState('');
+  const [coverPath, setCoverPath] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  if (!isOpen) return null;
+
+  async function handleAdd() {
+    if (!name.trim() || !executablePath.trim()) {
+      alert('El nombre y la ruta del ejecutable son obligatorios');
+      return;
+    }
+    setAdding(true);
+    try {
+      const year = releaseYear ? parseInt(releaseYear, 10) : null;
+      await invokeCmd('add_custom_game', {
+        name: name.trim(),
+        platform: 'custom',
+        executablePath: executablePath.trim(),
+        arguments: args.trim() ? args.trim() : null,
+        saga: saga.trim() ? saga.trim() : null,
+        console: consoleName.trim() ? consoleName.trim() : 'PC',
+        releaseYear: isNaN(year as number) ? null : year,
+        coverPath: coverPath.trim() ? coverPath.trim() : null,
+      });
+      onAdded();
+      onClose();
+    } catch (err) {
+      alert(`Error al agregar juego: ${err}`);
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+      <div className="w-full max-w-xl rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Plus className="h-5 w-5 text-neon-cyan" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              Añadir Juego Manual
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+              Nombre del Juego *
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Ej. Super Mario 64"
+              className="atlas-input mt-1 w-full text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+              Ruta del Ejecutable / ROM *
+            </label>
+            <input
+              type="text"
+              value={executablePath}
+              onChange={(e) => setExecutablePath(e.target.value)}
+              placeholder="C:\Juegos\game.exe o ruta a la ROM"
+              className="atlas-input mt-1 w-full text-xs font-mono"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Saga / Franquicia
+              </label>
+              <input
+                type="text"
+                value={saga}
+                onChange={(e) => setSaga(e.target.value)}
+                placeholder="Super Mario"
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Consola
+              </label>
+              <input
+                type="text"
+                value={consoleName}
+                onChange={(e) => setConsoleName(e.target.value)}
+                placeholder="PC, N64, PS2..."
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Año de Lanzamiento
+              </label>
+              <input
+                type="number"
+                value={releaseYear}
+                onChange={(e) => setReleaseYear(e.target.value)}
+                placeholder="1996"
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+            <div>
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Argumentos CLI
+              </label>
+              <input
+                type="text"
+                value={args}
+                onChange={(e) => setArgs(e.target.value)}
+                placeholder="-fullscreen"
+                className="atlas-input mt-1 w-full text-sm"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+              Carátula (URL web de imagen)
+            </label>
+            <input
+              type="text"
+              value={coverPath}
+              onChange={(e) => setCoverPath(e.target.value)}
+              placeholder="https://..."
+              className="atlas-input mt-1 w-full text-xs"
+            />
+          </div>
+        </div>
+
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-gray-800 pt-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-gray-700 px-4 py-2 font-mono text-xs text-gray-400 hover:bg-gray-800 hover:text-white"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={handleAdd}
+            disabled={adding}
+            className="atlas-btn-cyan px-5 py-2 font-mono text-xs disabled:opacity-50"
+          >
+            {adding ? 'Añadiendo...' : 'Añadir a Biblioteca'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------- Aplicación --------------------------- */
+
+export function App() {
   const [games, setGames] = useState<Game[]>([]);
-  const [view, setView] = useState<View>('catalog');
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<string>('INICIALIZANDO...');
   const [search, setSearch] = useState('');
-  const [status, setStatus] = useState('INICIANDO...');
-  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<View>('catalog');
   const [activePlatform, setActivePlatform] = useState<string | null>(null);
   const [activeSaga, setActiveSaga] = useState<string | null>(null);
+
+  // Modales
+  const [editingGame, setEditingGame] = useState<Game | null>(null);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
   const sagas = useMemo(() => groupBySaga(games), [games]);
 
@@ -265,11 +697,18 @@ function App() {
     setStatus(`LANZANDO ${game.name.toUpperCase()}...`);
     try {
       await invokeCmd('launch_game', {
+        gameId: game.id,
         executable: game.executable_path,
-        arguments: null,
+        arguments: game.arguments || null,
         workingDirectory: null,
       });
       setStatus(`${game.name.toUpperCase()} EN EJECUCIÓN`);
+
+      // Refrescar lista de juegos para actualizar último jugado y tiempo
+      setTimeout(async () => {
+        const refreshed = await invokeCmd<Game[]>('list_games');
+        setGames(refreshed);
+      }, 1500);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`ERROR AL LANZAR: ${message}`);
@@ -284,16 +723,16 @@ function App() {
   return (
     <div className="flex min-h-screen flex-col bg-atlas-dark font-pixel text-white">
       {/* Barra superior */}
-      <header className="sticky top-0 z-50 border-b border-gray-800 bg-black/70 backdrop-blur">
+      <header className="sticky top-0 z-40 border-b border-gray-800 bg-black/70 backdrop-blur">
         <div className="flex items-center justify-between gap-4 px-6 py-4">
           <div className="flex items-center gap-3">
-            <Gamepad2 className="h-8 w-8 text-neon-pink" />
+            <img src="/icon.png" alt="Atlas Logo" className="h-9 w-9 rounded-md object-contain" />
             <div>
               <h1 className="text-2xl font-bold uppercase tracking-[0.2em] text-neon-pink">
                 Atlas Launcher
               </h1>
               <p className="font-mono text-[10px] uppercase tracking-widest text-gray-500">
-                Organiza y sostiene toda tu biblioteca
+                Sostiene tu mundo de videojuegos
               </p>
             </div>
             <span className="mt-1 self-start font-mono text-[10px] text-gray-600">v1.0.0</span>
@@ -310,6 +749,17 @@ function App() {
               />
               <Search className="absolute right-3 top-2.5 h-4 w-4 text-gray-500" />
             </div>
+
+            <button
+              type="button"
+              onClick={() => setIsAddModalOpen(true)}
+              className="flex items-center gap-1.5 rounded border border-gray-700 bg-gray-900/80 px-3 py-2 font-mono text-xs text-gray-300 hover:border-gray-500 hover:text-white"
+              title="Añadir juego manualmente"
+            >
+              <Plus className="h-4 w-4 text-neon-cyan" />
+              Añadir
+            </button>
+
             <button
               type="button"
               onClick={() => void bootstrap(true)}
@@ -341,19 +791,19 @@ function App() {
                       setActivePlatform(platform.id);
                       setActiveSaga(null);
                     }}
-                    className={`flex w-full items-center justify-between rounded border px-3 py-2 font-mono text-[11px] uppercase tracking-wider transition-colors ${
+                    className={`flex w-full items-center justify-between rounded px-3 py-2 font-mono text-xs transition-colors ${
                       active
-                        ? 'border-neon-pink bg-neon-pink text-black'
-                        : 'border-transparent text-gray-400 hover:border-gray-700 hover:bg-gray-800/60'
+                        ? 'bg-neon-pink text-black font-bold'
+                        : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
                     }`}
                   >
-                    <span className="flex items-center gap-2">
+                    <div className="flex items-center gap-2">
                       <span
                         className="h-2 w-2 rounded-full"
                         style={{ backgroundColor: platform.color }}
                       />
-                      {platform.name}
-                    </span>
+                      <span>{platform.name}</span>
+                    </div>
                     <span className={active ? 'text-black/70' : 'text-gray-600'}>
                       {platform.count}
                     </span>
@@ -362,10 +812,10 @@ function App() {
               })}
             </div>
 
-            <h2 className="mb-3 mt-7 font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-neon-cyan">
-              Sagas
+            <h2 className="mb-3 mt-6 font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-neon-cyan">
+              Sagas y Franquicias
             </h2>
-            <div className="scrollbar-hide max-h-80 space-y-1 overflow-y-auto pr-1">
+            <div className="scrollbar-hide flex-1 space-y-1 overflow-y-auto pr-1">
               {sagas.map((saga) => {
                 const active = activeSaga === saga.name;
                 return (
@@ -374,9 +824,8 @@ function App() {
                     type="button"
                     onClick={() => {
                       setActiveSaga(active ? null : saga.name);
-                      setView('catalog');
                     }}
-                    className={`flex w-full items-center justify-between rounded px-3 py-1.5 text-left font-mono text-[11px] transition-colors ${
+                    className={`flex w-full items-center justify-between rounded px-3 py-1.5 font-mono text-xs transition-colors ${
                       active
                         ? 'bg-neon-cyan text-black'
                         : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
@@ -451,7 +900,7 @@ function App() {
                   onClick={() => setView('sagas')}
                   className={`flex items-center gap-2 rounded border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition-colors ${
                     view === 'sagas'
-                      ? 'border-neon-green bg-neon-green text-black'
+                      ? 'border-neon-pink bg-neon-pink text-black'
                       : 'border-gray-700 text-gray-400 hover:bg-gray-800'
                   }`}
                 >
@@ -460,36 +909,59 @@ function App() {
               </div>
             </div>
 
-            {loading ? (
-              <div className="flex h-72 flex-col items-center justify-center gap-4">
-                <RefreshCw className="h-10 w-10 animate-spin text-neon-pink" />
-                <p className="font-mono text-xs text-gray-400">{status}</p>
-              </div>
-            ) : games.length === 0 ? (
-              <div className="flex h-72 flex-col items-center justify-center gap-4 text-center">
-                <FolderOpen className="h-14 w-14 text-gray-700" />
-                <div>
-                  <p className="font-mono text-sm text-gray-300">No se encontraron juegos</p>
-                  <p className="mt-2 max-w-md font-mono text-xs text-gray-500">
-                    Pulsa ESCANEAR para buscar juegos de Steam/Epic/GOG y accesos directos del
-                    escritorio.
-                  </p>
-                </div>
-              </div>
-            ) : filteredGames.length === 0 ? (
-              <div className="flex h-72 flex-col items-center justify-center gap-3 text-center">
-                <Search className="h-12 w-12 text-gray-700" />
-                <p className="font-mono text-sm text-gray-400">Sin resultados para tu búsqueda</p>
-              </div>
-            ) : view === 'catalog' ? (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
-                {filteredGames.map((game) => (
-                  <GameCard key={game.id} game={game} onLaunch={handleLaunch} />
-                ))}
+            {/* Vistas */}
+            {view === 'catalog' ? (
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
+                {filteredGames.map((game) => {
+                  const accent = PLATFORM_COLORS[game.platform] || '#ffffff';
+                  return (
+                    <div
+                      key={game.id}
+                      className="group relative flex flex-col justify-between overflow-hidden rounded-lg border border-gray-800 bg-atlas-panel transition-all hover:-translate-y-1 hover:border-gray-600 hover:shadow-xl"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleLaunch(game)}
+                        className="text-left focus:outline-none"
+                      >
+                        <Poster game={game} />
+                        <div className="p-3">
+                          <h3 className="line-clamp-1 text-xs font-bold text-white group-hover:text-neon-pink">
+                            {game.name}
+                          </h3>
+                          <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-gray-500">
+                            <span style={{ color: accent }}>
+                              {PLATFORM_LABELS[game.platform] || game.platform}
+                            </span>
+                            <span>{game.release_year ?? '—'}</span>
+                          </div>
+                          {game.play_time_minutes > 0 && (
+                            <p className="mt-1 font-mono text-[9px] text-gray-400">
+                              Jugado: {formatPlaytime(game.play_time_minutes)}
+                            </p>
+                          )}
+                        </div>
+                      </button>
+
+                      {/* Botón flotante para editar */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingGame(game);
+                        }}
+                        className="absolute right-2 top-2 rounded-md bg-black/70 p-1.5 text-gray-300 opacity-0 backdrop-blur transition-opacity hover:bg-black hover:text-white group-hover:opacity-100"
+                        title="Editar metadatos / argumentos"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             ) : view === 'list' ? (
               <List
-                height={Math.max(420, window.innerHeight - 230)}
+                height={700}
                 itemCount={filteredGames.length}
                 itemSize={132}
                 width="100%"
@@ -500,11 +972,7 @@ function App() {
                   const accent = PLATFORM_COLORS[game.platform] || '#ffffff';
                   return (
                     <div style={style} className="pr-2">
-                      <button
-                        type="button"
-                        onClick={() => handleLaunch(game)}
-                        className="atlas-card flex h-[120px] w-full items-center gap-4 p-3 text-left hover:border-neon-pink"
-                      >
+                      <div className="atlas-card flex h-[120px] w-full items-center gap-4 p-3 text-left hover:border-neon-pink">
                         <div className="w-[72px] shrink-0">
                           <Poster game={game} />
                         </div>
@@ -521,15 +989,33 @@ function App() {
                             <span className="rounded border border-gray-700 px-2 py-0.5 font-mono text-[10px] text-gray-300">
                               {game.console || 'PC'}
                             </span>
+                            {game.play_time_minutes > 0 && (
+                              <span className="rounded border border-gray-700 px-2 py-0.5 font-mono text-[10px] text-neon-cyan">
+                                {formatPlaytime(game.play_time_minutes)}
+                              </span>
+                            )}
                           </div>
                         </div>
-                        <span
-                          className="flex items-center rounded border px-3 py-2 font-mono text-[10px] uppercase tracking-wider"
-                          style={{ color: accent, borderColor: accent }}
-                        >
-                          <Play className="mr-1 h-3 w-3" /> Jugar
-                        </span>
-                      </button>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingGame(game)}
+                            className="rounded border border-gray-700 p-2 text-gray-400 hover:border-gray-500 hover:text-white"
+                            title="Editar"
+                          >
+                            <Edit3 className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleLaunch(game)}
+                            className="flex items-center rounded border px-3 py-2 font-mono text-[10px] uppercase tracking-wider"
+                            style={{ color: accent, borderColor: accent }}
+                          >
+                            <Play className="mr-1 h-3 w-3" /> Jugar
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   );
                 }}
@@ -547,7 +1033,7 @@ function App() {
                     </div>
                     <div className="grid grid-cols-4 gap-2">
                       {saga.games.map((game) => (
-                        <div key={game.id} className="group">
+                        <div key={game.id} className="group relative">
                           <button
                             type="button"
                             onClick={() => handleLaunch(game)}
@@ -562,6 +1048,17 @@ function App() {
                               {game.release_year ?? '—'}
                             </p>
                           </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingGame(game);
+                            }}
+                            className="absolute right-1 top-1 rounded bg-black/80 p-1 text-gray-300 opacity-0 group-hover:opacity-100"
+                            title="Editar"
+                          >
+                            <Edit3 className="h-3 w-3" />
+                          </button>
                         </div>
                       ))}
                     </div>
@@ -572,6 +1069,27 @@ function App() {
           </div>
         </main>
       </div>
+
+      {/* Modales */}
+      <EditGameModal
+        isOpen={Boolean(editingGame)}
+        game={editingGame}
+        onClose={() => setEditingGame(null)}
+        onSave={(updated) => {
+          setGames((prev) => prev.map((g) => (g.id === updated.id ? updated : g)));
+        }}
+        onDelete={(id) => {
+          setGames((prev) => prev.filter((g) => g.id !== id));
+        }}
+      />
+
+      <AddGameModal
+        isOpen={isAddModalOpen}
+        onClose={() => setIsAddModalOpen(false)}
+        onAdded={() => {
+          void bootstrap(false);
+        }}
+      />
     </div>
   );
 }
