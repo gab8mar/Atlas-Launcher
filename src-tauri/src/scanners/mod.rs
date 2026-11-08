@@ -497,7 +497,8 @@ fn is_non_game_shortcut(name: &str, target: &Path) -> bool {
         "audacity", "gimp-3.2", "gimp-3.0", "inkscape", "krita", "libresprite",
         "qbittorrent", "rustdesk", "irium", "forticlient", "acrord32", "epson",
         "unins000", "uninstall", "antigravity", "notepad", "pcsx2", "pcsx2-qt",
-        "retroarch", "dolphin", "rpcs3", "ryujinx", "mgba", "dosbox",
+        "retroarch", "dolphin", "rpcs3", "ryujinx", "mgba", "dosbox", "atlas launcher",
+        "atlas-launcher",
     ];
     const CONTAINS: &[&str] = &[
         "uninstall", "desinstalar", "readme", "servidor", "escritorio remoto",
@@ -520,6 +521,11 @@ fn is_non_game_shortcut(name: &str, target: &Path) -> bool {
         .iter()
         .any(|item| lower_name.contains(item) || target_lower.contains(item))
     {
+        return true;
+    }
+
+    // El propio launcher nunca debe aparecer como juego.
+    if target_lower.ends_with("atlas-launcher.exe") {
         return true;
     }
 
