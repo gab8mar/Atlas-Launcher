@@ -1,0 +1,3 @@
+.vite-icon {
+  display: none;
+}
