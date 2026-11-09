@@ -14,12 +14,14 @@
       {
         "label": "main",
         "title": "Atlas Launcher",
-        "width": 1400,
-        "height": 900,
+        "width": 1280,
+        "height": 760,
         "minWidth": 1024,
-        "minHeight": 640,
+        "minHeight": 600,
         "resizable": true,
-        "center": true
+        "center": true,
+        "maximized": false,
+        "decorations": true
       }
     ],
     "security": {
