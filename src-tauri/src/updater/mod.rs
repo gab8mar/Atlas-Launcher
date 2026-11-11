@@ -100,33 +100,52 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 }
 
 /// Elige el instalador más adecuado de entre los assets del release.
+///
+/// Si la aplicación está instalada en `Program Files` (instalación por
+/// máquina, típicamente MSI) se prefiere el `.msi`; en caso contrario se usa
+/// el instalador NSIS, que instala por usuario.
 fn select_installer(assets: &[GithubAsset]) -> Option<&GithubAsset> {
     let is_installer = |asset: &GithubAsset| {
         let name = asset.name.to_lowercase();
         name.ends_with(".exe") || name.ends_with(".msi")
     };
 
-    // Preferimos el instalador NSIS (`..._x64-setup.exe`), luego cualquier EXE
-    // y por último el paquete MSI.
     let candidates: Vec<&GithubAsset> = assets.iter().filter(|asset| is_installer(asset)).collect();
 
-    candidates
+    let nsis = candidates
         .iter()
-        .find(|asset| {
-            let name = asset.name.to_lowercase();
-            name.ends_with("setup.exe") || name.ends_with("-setup.exe")
-        })
+        .find(|asset| asset.name.to_lowercase().ends_with("-setup.exe"))
         .or_else(|| {
             candidates
                 .iter()
                 .find(|asset| asset.name.to_lowercase().ends_with(".exe"))
         })
-        .or_else(|| {
-            candidates
-                .iter()
-                .find(|asset| asset.name.to_lowercase().ends_with(".msi"))
-        })
-        .copied()
+        .copied();
+
+    let msi = candidates
+        .iter()
+        .find(|asset| asset.name.to_lowercase().ends_with(".msi"))
+        .copied();
+
+    if is_per_machine_install() {
+        msi.or(nsis)
+    } else {
+        nsis.or(msi)
+    }
+}
+
+/// Detecta si la aplicación se instaló en `Program Files`.
+fn is_per_machine_install() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path.to_string_lossy().to_lowercase(),
+        Err(_) => return false,
+    };
+
+    ["ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(|variable| std::env::var(variable).ok())
+        .filter(|path| !path.is_empty())
+        .any(|path| exe.starts_with(&path.to_lowercase()))
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
