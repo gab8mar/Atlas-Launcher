@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
+import { listen } from '@tauri-apps/api/event';
 import {
   BookOpen,
+  CheckCircle2,
   Cpu,
+  Download,
   Edit3,
-  FolderOpen,
   Gamepad2,
-  Heart,
-  Image as ImageIcon,
   LayoutGrid,
   List as ListIcon,
   Play,
@@ -48,6 +49,26 @@ interface ScanResult {
   emulators_found: number;
   platforms_scanned: string[];
   errors: string[];
+}
+
+interface UpdateInfo {
+  available: boolean;
+  current_version: string;
+  latest_version: string;
+  release_name: string | null;
+  release_notes: string | null;
+  published_at: string | null;
+  html_url: string | null;
+  asset_name: string | null;
+  download_url: string | null;
+  asset_size: number | null;
+  digest: string | null;
+}
+
+interface UpdateProgress {
+  downloaded: number;
+  total: number;
+  percent: number;
 }
 
 type View = 'catalog' | 'list' | 'sagas';
@@ -586,6 +607,163 @@ function AddGameModal({ isOpen, onClose, onAdded }: AddGameModalProps) {
   );
 }
 
+/* -------------------------- Modal Actualización ------------------ */
+
+interface UpdateModalProps {
+  isOpen: boolean;
+  info: UpdateInfo | null;
+  error: string | null;
+  installing: boolean;
+  progress: number;
+  onClose: () => void;
+  onInstall: () => void;
+  onRetry: () => void;
+}
+
+function UpdateModal({
+  isOpen,
+  info,
+  error,
+  installing,
+  progress,
+  onClose,
+  onInstall,
+  onRetry,
+}: UpdateModalProps) {
+  if (!isOpen) return null;
+
+  const canInstall = Boolean(info?.available && info.download_url && info.asset_name);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Download className="h-5 w-5 text-neon-cyan" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              Actualización de Atlas Launcher
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={installing}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-40"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-4">
+          {error && (
+            <div className="rounded border border-red-500/40 bg-red-500/10 p-3 font-mono text-xs text-red-300">
+              {error}
+            </div>
+          )}
+
+          {!error && !info && (
+            <p className="font-mono text-sm text-gray-400">Consultando GitHub Releases...</p>
+          )}
+
+          {info && !info.available && (
+            <div className="flex items-start gap-3 rounded border border-green-500/30 bg-green-500/10 p-4">
+              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-green-400" />
+              <div>
+                <p className="text-sm font-bold text-white">Estás al día</p>
+                <p className="mt-1 font-mono text-xs text-gray-400">
+                  Atlas Launcher v{info.current_version} es la última versión disponible.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {info && info.available && (
+            <>
+              <div className="flex items-center justify-between rounded border border-gray-800 bg-black/30 p-3 font-mono text-xs">
+                <span className="text-gray-400">
+                  Versión actual: <span className="text-white">v{info.current_version}</span>
+                </span>
+                <span className="text-gray-400">
+                  Nueva versión: <span className="text-neon-pink">v{info.latest_version}</span>
+                </span>
+              </div>
+
+              {info.release_notes && (
+                <div>
+                  <p className="mb-1 font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                    Notas del release
+                  </p>
+                  <pre className="scrollbar-hide max-h-40 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-gray-300">
+                    {info.release_notes}
+                  </pre>
+                </div>
+              )}
+
+              {!info.download_url && (
+                <p className="font-mono text-xs text-yellow-400">
+                  El release no incluye un instalador compatible (.exe/.msi). Descárgalo manualmente
+                  desde GitHub.
+                </p>
+              )}
+
+              {installing && (
+                <div>
+                  <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-gray-400">
+                    <span>Descargando actualización...</span>
+                    <span className="text-neon-cyan">{progress}%</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-800">
+                    <div
+                      className="h-full rounded-full bg-neon-cyan transition-all"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 font-mono text-[10px] text-gray-500">
+                    La aplicación se cerrará para completar la instalación.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-gray-800 pt-4">
+          {error ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="atlas-btn-cyan px-5 py-2 font-mono text-xs"
+            >
+              Reintentar
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={installing}
+                className="rounded border border-gray-700 px-4 py-2 font-mono text-xs text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-40"
+              >
+                {info?.available ? 'Más tarde' : 'Cerrar'}
+              </button>
+              {canInstall && (
+                <button
+                  type="button"
+                  onClick={onInstall}
+                  disabled={installing}
+                  className="atlas-btn-cyan px-5 py-2 font-mono text-xs disabled:opacity-50"
+                >
+                  {installing ? 'Instalando...' : 'Descargar e instalar'}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------------- Aplicación --------------------------- */
 
 export function App() {
@@ -600,6 +778,15 @@ export function App() {
   // Modales
   const [editingGame, setEditingGame] = useState<Game | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  // Actualizaciones
+  const [appVersion, setAppVersion] = useState('1.0.0');
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   const sagas = useMemo(() => groupBySaga(games), [games]);
 
@@ -648,6 +835,71 @@ export function App() {
   useEffect(() => {
     void bootstrap(true);
   }, []);
+
+  useEffect(() => {
+    void getVersion()
+      .then((version) => setAppVersion(version))
+      .catch(() => {
+        /* La versión mostrada es solo informativa. */
+      });
+
+    let unlisten: (() => void) | undefined;
+    void listen<UpdateProgress>('atlas-update-progress', (event) => {
+      setUpdateProgress(Math.round(event.payload.percent));
+    })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {
+        /* Sin listener el modal sigue funcionando sin barra de progreso. */
+      });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  async function handleCheckUpdate() {
+    setCheckingUpdate(true);
+    setUpdateError(null);
+    try {
+      const info = await invokeCmd<UpdateInfo>('check_update');
+      setUpdateInfo(info);
+      setIsUpdateModalOpen(true);
+      setStatus(
+        info.available
+          ? `ACTUALIZACIÓN DISPONIBLE: v${info.latest_version}`
+          : `ATLAS LAUNCHER v${info.current_version} ESTÁ ACTUALIZADO`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateInfo(null);
+      setUpdateError(message);
+      setIsUpdateModalOpen(true);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!updateInfo?.download_url || !updateInfo.asset_name) return;
+
+    setInstallingUpdate(true);
+    setUpdateError(null);
+    setUpdateProgress(0);
+    try {
+      await invokeCmd<string>('install_update', {
+        downloadUrl: updateInfo.download_url,
+        assetName: updateInfo.asset_name,
+        expectedDigest: updateInfo.digest ?? null,
+      });
+      setStatus('DESCARGANDO ACTUALIZACIÓN...');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateError(message);
+      setInstallingUpdate(false);
+    }
+  }
 
   async function bootstrap(scanOnStart: boolean) {
     setLoading(true);
@@ -735,7 +987,9 @@ export function App() {
                 Sostiene tu mundo de videojuegos
               </p>
             </div>
-            <span className="mt-1 self-start font-mono text-[10px] text-gray-600">v1.0.0</span>
+            <span className="mt-1 self-start font-mono text-[10px] text-gray-600">
+              v{appVersion}
+            </span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -758,6 +1012,21 @@ export function App() {
             >
               <Plus className="h-4 w-4 text-neon-cyan" />
               Añadir
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleCheckUpdate()}
+              disabled={checkingUpdate}
+              className={`flex items-center gap-1.5 rounded border px-3 py-2 font-mono text-xs transition-colors disabled:opacity-50 ${
+                updateInfo?.available
+                  ? 'border-neon-pink bg-neon-pink/15 text-neon-pink hover:bg-neon-pink/25'
+                  : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-gray-500 hover:text-white'
+              }`}
+              title="Buscar e instalar la última versión publicada en GitHub"
+            >
+              <Download className={`h-4 w-4 ${checkingUpdate ? 'animate-bounce' : ''}`} />
+              {checkingUpdate ? 'BUSCANDO...' : 'ACTUALIZAR'}
             </button>
 
             <button
@@ -1089,6 +1358,17 @@ export function App() {
         onAdded={() => {
           void bootstrap(false);
         }}
+      />
+
+      <UpdateModal
+        isOpen={isUpdateModalOpen}
+        info={updateInfo}
+        error={updateError}
+        installing={installingUpdate}
+        progress={updateProgress}
+        onClose={() => setIsUpdateModalOpen(false)}
+        onInstall={() => void handleInstallUpdate()}
+        onRetry={() => void handleCheckUpdate()}
       />
     </div>
   );

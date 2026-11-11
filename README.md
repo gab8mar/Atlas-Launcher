@@ -21,6 +21,8 @@ catálogo visual tipo "Netflix", una vista de lista y colecciones por saga.
   Epic y emuladores con ROM/ISO.
 - **Persistencia en SQLite**: la biblioteca se conserva entre sesiones y los juegos
   desinstalados dejan de mostrarse tras el siguiente escaneo.
+- **Actualizaciones integradas**: el botón *Actualizar* consulta los releases de GitHub,
+  descarga el instalador más reciente y lo ejecuta.
 
 ## Tecnologías
 
@@ -52,6 +54,24 @@ npm run tauri build
 El ejecutable y los instaladores se generan en `src-tauri/target/release/bundle/`
 (o en el `target-dir` configurado en tu entorno).
 
+## Publicar una nueva versión
+
+1. Actualiza la versión en `package.json`, `src-tauri/Cargo.toml` y
+   `src-tauri/tauri.conf.json` (deben coincidir).
+2. Crea y sube el tag:
+
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+
+3. GitHub Actions compila la aplicación y crea un **draft release** con los instaladores
+   `.exe` (NSIS) y `.msi`. Publícalo desde GitHub para que el botón *Actualizar* del
+   launcher lo detecte.
+
+Los pushes a `main` y las pull requests compilan el proyecto (sin publicar release) y
+suben los instaladores como artefactos del workflow.
+
 ## Estructura del proyecto
 
 ```
@@ -63,6 +83,7 @@ src-tauri/src/
   metadata/          Cliente de metadatos (IGDB / SteamGridDB, en desarrollo)
   sagas/             Detección y agrupación de sagas
   scanners/          Detectores de Steam, Epic, GOG, escritorio y ROMs
+  updater/           Comprobación y descarga de releases desde GitHub
 ```
 
 ## Estado del proyecto
