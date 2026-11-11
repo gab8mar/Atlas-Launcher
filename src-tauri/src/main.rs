@@ -8,6 +8,7 @@ mod launcher;
 mod metadata;
 mod sagas;
 mod scanners;
+mod updater;
 
 use tauri::generate_handler;
 use tauri::Manager;
@@ -37,6 +38,8 @@ fn main() {
             commands::add_custom_game,
             commands::delete_game,
             commands::save_game_cover,
+            commands::check_update,
+            commands::install_update,
         ])
         .setup(|app| {
             init_logging();

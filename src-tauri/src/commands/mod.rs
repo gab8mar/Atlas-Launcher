@@ -1,10 +1,11 @@
-use tauri::{command, State};
+use tauri::{command, AppHandle, State};
 
 use crate::database::{self, DbState, GameRow};
 use crate::launcher;
 use crate::metadata;
 use crate::sagas::{self, GroupingResult};
 use crate::scanners::{self, DetectedGame, ScanResult};
+use crate::updater;
 
 /// Comando: Inicializar base de datos
 #[command]
@@ -260,4 +261,21 @@ pub async fn launch_emulated_game(
     }
 
     Ok(result)
+}
+
+/// Comando: Buscar una nueva versión publicada en GitHub Releases
+#[command]
+pub async fn check_update() -> Result<updater::UpdateInfo, String> {
+    updater::check_for_update().await
+}
+
+/// Comando: Descargar e instalar la actualización indicada
+#[command]
+pub async fn install_update(
+    app: AppHandle,
+    download_url: String,
+    asset_name: String,
+    expected_digest: Option<String>,
+) -> Result<String, String> {
+    updater::download_and_install(app, &download_url, &asset_name, expected_digest.as_deref()).await
 }
