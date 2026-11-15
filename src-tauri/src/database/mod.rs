@@ -522,3 +522,146 @@ pub async fn delete_game(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> 
 pub async fn init(state: &DbState) -> Result<(), sqlx::Error> {
     state.pool().await.map(|_| ())
 }
+
+/* -------------------------------------------------------------------------- */
+/*                        METADATOS Y CARÁTULAS EXTERNAS                      */
+/* -------------------------------------------------------------------------- */
+
+/// Datos que se guardan en la tabla `metadata` para una fuente externa.
+pub struct MetadataUpsert<'a> {
+    pub source: &'a str,
+    pub external_id: Option<&'a str>,
+    pub raw_json: Option<&'a str>,
+    pub cover_url: Option<&'a str>,
+    pub banner_url: Option<&'a str>,
+    pub logo_url: Option<&'a str>,
+    pub release_year: Option<i32>,
+    pub console: Option<&'a str>,
+    pub developer: Option<&'a str>,
+    pub publisher: Option<&'a str>,
+    pub genre: Option<&'a str>,
+    pub rating: Option<f64>,
+}
+
+/// Devuelve el nombre de un juego y su carátula actual.
+pub async fn game_name_and_cover(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
+    let row = sqlx::query("SELECT name, cover_path FROM games WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+
+    match row {
+        Some(row) => Ok(Some((row.try_get("name")?, row.try_get("cover_path")?))),
+        None => Ok(None),
+    }
+}
+
+/// Juegos instalados que aún no tienen carátula (para descarga masiva).
+pub async fn list_games_without_cover(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name
+        FROM games
+        WHERE installed = 1
+          AND (cover_path IS NULL OR TRIM(cover_path) = '')
+        ORDER BY name COLLATE NOCASE
+        LIMIT ?1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut games = Vec::with_capacity(rows.len());
+    for row in rows {
+        games.push((row.try_get("id")?, row.try_get("name")?));
+    }
+    Ok(games)
+}
+
+/// Actualiza solo los campos que aportaron los metadatos externos.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_game_metadata(
+    pool: &SqlitePool,
+    id: i64,
+    release_year: Option<i32>,
+    console: Option<&str>,
+    cover_path: Option<&str>,
+    banner_path: Option<&str>,
+    logo_path: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE games
+        SET release_year = COALESCE(?2, release_year),
+            console = COALESCE(?3, console),
+            cover_path = COALESCE(?4, cover_path),
+            banner_path = COALESCE(?5, banner_path),
+            logo_path = COALESCE(?6, logo_path),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?1
+        "#,
+    )
+    .bind(id)
+    .bind(release_year)
+    .bind(console)
+    .bind(cover_path)
+    .bind(banner_path)
+    .bind(logo_path)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Inserta o actualiza la caché de metadatos de un juego.
+pub async fn upsert_game_metadata(
+    pool: &SqlitePool,
+    game_id: i64,
+    data: &MetadataUpsert<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO metadata (
+            game_id, source, external_id, raw_json, cover_url, banner_url, logo_url,
+            release_year, console, developer, publisher, genre, rating, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP)
+        ON CONFLICT(game_id, source) DO UPDATE SET
+            external_id = excluded.external_id,
+            raw_json = excluded.raw_json,
+            cover_url = excluded.cover_url,
+            banner_url = excluded.banner_url,
+            logo_url = excluded.logo_url,
+            release_year = excluded.release_year,
+            console = excluded.console,
+            developer = excluded.developer,
+            publisher = excluded.publisher,
+            genre = excluded.genre,
+            rating = excluded.rating,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(game_id)
+    .bind(data.source)
+    .bind(data.external_id)
+    .bind(data.raw_json)
+    .bind(data.cover_url)
+    .bind(data.banner_url)
+    .bind(data.logo_url)
+    .bind(data.release_year)
+    .bind(data.console)
+    .bind(data.developer)
+    .bind(data.publisher)
+    .bind(data.genre)
+    .bind(data.rating)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}

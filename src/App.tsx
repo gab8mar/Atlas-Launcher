@@ -9,12 +9,15 @@ import {
   Download,
   Edit3,
   Gamepad2,
+  ImageDown,
   LayoutGrid,
   List as ListIcon,
+  Loader2,
   Play,
   Plus,
   RefreshCw,
   Search,
+  Settings,
   Sparkles,
   Trash2,
   X,
@@ -69,6 +72,41 @@ interface UpdateProgress {
   downloaded: number;
   total: number;
   percent: number;
+}
+
+interface MetadataSettings {
+  igdb_client_id: string | null;
+  igdb_configured: boolean;
+  steamgriddb_configured: boolean;
+  credentials_path: string;
+}
+
+interface MetadataResult {
+  game_id: number;
+  source: string | null;
+  release_year: number | null;
+  console: string | null;
+  genre: string | null;
+  rating: number | null;
+  cover_path: string | null;
+  banner_path: string | null;
+  logo_path: string | null;
+  warnings: string[];
+}
+
+interface MetadataProgress {
+  processed: number;
+  total: number;
+  game_id: number;
+  name: string;
+  cover_path: string | null;
+  error: string | null;
+}
+
+interface MetadataBulkResult {
+  total: number;
+  updated: number;
+  failed: number;
 }
 
 type View = 'catalog' | 'list' | 'sagas';
@@ -208,9 +246,17 @@ interface EditModalProps {
   onClose: () => void;
   onSave: (updated: Game) => void;
   onDelete: (id: number) => void;
+  onMetadataFetched: (id: number, changes: Partial<Game>) => void;
 }
 
-function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalProps) {
+function EditGameModal({
+  game,
+  isOpen,
+  onClose,
+  onSave,
+  onDelete,
+  onMetadataFetched,
+}: EditModalProps) {
   const [name, setName] = useState('');
   const [saga, setSaga] = useState('');
   const [releaseYear, setReleaseYear] = useState<string>('');
@@ -219,6 +265,9 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
   const [args, setArgs] = useState('');
   const [coverPath, setCoverPath] = useState('');
   const [saving, setSaving] = useState(false);
+  const [fetchingMeta, setFetchingMeta] = useState(false);
+  const [metaMessage, setMetaMessage] = useState<string | null>(null);
+  const [metaError, setMetaError] = useState(false);
 
   useEffect(() => {
     if (game) {
@@ -229,10 +278,54 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
       setExecutablePath(game.executable_path || '');
       setArgs(game.arguments || '');
       setCoverPath(game.cover_path || '');
+      setMetaMessage(null);
+      setMetaError(false);
     }
   }, [game]);
 
   if (!isOpen || !game) return null;
+
+  async function handleFetchMetadata() {
+    if (!game) return;
+    setFetchingMeta(true);
+    setMetaMessage(null);
+    setMetaError(false);
+    try {
+      const result = await invokeCmd<MetadataResult>('fetch_game_metadata', {
+        gameId: game.id,
+      });
+
+      if (result.release_year) setReleaseYear(String(result.release_year));
+      if (result.console) setConsoleName(result.console);
+      if (result.cover_path) setCoverPath(result.cover_path);
+
+      onMetadataFetched(game.id, {
+        cover_path: result.cover_path ?? game.cover_path,
+        release_year: result.release_year ?? game.release_year,
+        console: result.console ?? game.console,
+      });
+
+      const details = [
+        result.source ? `fuente ${result.source.toUpperCase()}` : null,
+        result.genre ?? null,
+        result.rating ? `${result.rating.toFixed(1)}/100` : null,
+      ].filter(Boolean);
+
+      setMetaMessage(
+        details.length > 0
+          ? `Metadatos encontrados · ${details.join(' · ')}`
+          : 'Metadatos encontrados',
+      );
+      if (result.warnings.length > 0) {
+        console.warn('Avisos de metadatos:', result.warnings);
+      }
+    } catch (err) {
+      setMetaError(true);
+      setMetaMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFetchingMeta(false);
+    }
+  }
 
   async function handleSave() {
     if (!game) return;
@@ -378,9 +471,25 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
           </div>
 
           <div>
-            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
-              Carátula (URL web o ruta local de imagen)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Carátula (URL web o ruta local de imagen)
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleFetchMetadata()}
+                disabled={fetchingMeta}
+                className="flex items-center gap-1 rounded border border-neon-cyan/50 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-neon-cyan hover:bg-neon-cyan/10 disabled:opacity-50"
+                title="Buscar metadatos y portada en IGDB / SteamGridDB"
+              >
+                {fetchingMeta ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3 w-3" />
+                )}
+                {fetchingMeta ? 'Buscando...' : 'Buscar automático'}
+              </button>
+            </div>
             <div className="mt-1 flex gap-2">
               <input
                 type="text"
@@ -390,6 +499,15 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
                 className="atlas-input flex-1 text-xs"
               />
             </div>
+            {metaMessage && (
+              <p
+                className={`mt-2 font-mono text-[10px] leading-relaxed ${
+                  metaError ? 'text-red-400' : 'text-neon-cyan'
+                }`}
+              >
+                {metaMessage}
+              </p>
+            )}
           </div>
         </div>
 
@@ -620,6 +738,228 @@ interface UpdateModalProps {
   onRetry: () => void;
 }
 
+/* -------------------------- Modal Ajustes ------------------------ */
+
+interface MetadataSettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+function MetadataSettingsModal({ isOpen, onClose }: MetadataSettingsModalProps) {
+  const [igdbClientId, setIgdbClientId] = useState('');
+  const [igdbClientSecret, setIgdbClientSecret] = useState('');
+  const [steamgriddbApiKey, setSteamgriddbApiKey] = useState('');
+  const [settings, setSettings] = useState<MetadataSettings | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    setMessage(null);
+    setError(false);
+    setIgdbClientSecret('');
+    setSteamgriddbApiKey('');
+    setLoading(true);
+
+    void invokeCmd<MetadataSettings>('get_metadata_settings')
+      .then((value) => {
+        setSettings(value);
+        setIgdbClientId(value.igdb_client_id || '');
+      })
+      .catch((err) => {
+        setError(true);
+        setMessage(err instanceof Error ? err.message : String(err));
+        setSettings(null);
+      })
+      .finally(() => setLoading(false));
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  async function handleSave() {
+    setSaving(true);
+    setMessage(null);
+    setError(false);
+    try {
+      const value = await invokeCmd<MetadataSettings>('save_metadata_settings', {
+        igdbClientId: igdbClientId.trim() || null,
+        igdbClientSecret: igdbClientSecret.trim() || null,
+        steamgriddbApiKey: steamgriddbApiKey.trim() || null,
+        clear: false,
+      });
+      setSettings(value);
+      setIgdbClientSecret('');
+      setSteamgriddbApiKey('');
+      setMessage('Claves guardadas. Ya puedes usar «Buscar automático» y «Portadas».');
+    } catch (err) {
+      setError(true);
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleClear() {
+    if (!confirm('¿Borrar las claves de IGDB y SteamGridDB guardadas en este equipo?')) return;
+    setSaving(true);
+    setMessage(null);
+    setError(false);
+    try {
+      const value = await invokeCmd<MetadataSettings>('save_metadata_settings', {
+        igdbClientId: null,
+        igdbClientSecret: null,
+        steamgriddbApiKey: null,
+        clear: true,
+      });
+      setSettings(value);
+      setIgdbClientId('');
+      setIgdbClientSecret('');
+      setSteamgriddbApiKey('');
+      setMessage('Claves eliminadas.');
+    } catch (err) {
+      setError(true);
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Settings className="h-5 w-5 text-neon-cyan" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              Ajustes de metadatos
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <p className="mt-4 font-mono text-[10px] leading-relaxed text-gray-500">
+          IGDB aporta año, género, nota y carátula; SteamGridDB aporta carátula vertical, banner
+          y logo. Las claves se guardan solo en este equipo. Deja un campo vacío para conservar
+          la clave ya guardada.
+        </p>
+
+        {loading ? (
+          <div className="mt-6 flex items-center gap-2 font-mono text-xs text-gray-400">
+            <Loader2 className="h-4 w-4 animate-spin" /> Cargando ajustes...
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block font-mono text-[10px] uppercase tracking-wider text-gray-400">
+                  IGDB Client ID
+                </label>
+                <input
+                  type="text"
+                  value={igdbClientId}
+                  onChange={(e) => setIgdbClientId(e.target.value)}
+                  placeholder="xxxxxxxxxxxxxxxx"
+                  className="atlas-input mt-1 w-full text-xs"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-[10px] uppercase tracking-wider text-gray-400">
+                  IGDB Client Secret
+                </label>
+                <input
+                  type="password"
+                  value={igdbClientSecret}
+                  onChange={(e) => setIgdbClientSecret(e.target.value)}
+                  placeholder={settings?.igdb_configured ? '•••••• (guardado)' : 'sin configurar'}
+                  className="atlas-input mt-1 w-full text-xs"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block font-mono text-[10px] uppercase tracking-wider text-gray-400">
+                SteamGridDB API Key
+              </label>
+              <input
+                type="password"
+                value={steamgriddbApiKey}
+                onChange={(e) => setSteamgriddbApiKey(e.target.value)}
+                placeholder={settings?.steamgriddb_configured ? '•••••• (guardada)' : 'sin configurar'}
+                className="atlas-input mt-1 w-full text-xs"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-3 font-mono text-[10px] text-gray-500">
+              <span className={settings?.igdb_configured ? 'text-neon-cyan' : ''}>
+                IGDB: {settings?.igdb_configured ? 'configurado' : 'pendiente'}
+              </span>
+              <span className={settings?.steamgriddb_configured ? 'text-neon-cyan' : ''}>
+                SteamGridDB: {settings?.steamgriddb_configured ? 'configurado' : 'pendiente'}
+              </span>
+            </div>
+
+            <div className="rounded border border-gray-800 bg-black/30 p-3 font-mono text-[9px] leading-relaxed text-gray-500">
+              <p>IGDB: dev.twitch.tv/console/apps · api-docs.igdb.com</p>
+              <p>SteamGridDB: steamgriddb.com/profile/preferences/api</p>
+              <p className="mt-1 break-all text-gray-600">{settings?.credentials_path}</p>
+            </div>
+          </div>
+        )}
+
+        {message && (
+          <p
+            className={`mt-4 rounded border p-3 font-mono text-[10px] leading-relaxed ${
+              error
+                ? 'border-red-500/40 bg-red-500/10 text-red-300'
+                : 'border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan'
+            }`}
+          >
+            {message}
+          </p>
+        )}
+
+        <div className="mt-6 flex items-center justify-between border-t border-gray-800 pt-4">
+          <button
+            type="button"
+            onClick={() => void handleClear()}
+            disabled={saving}
+            className="rounded px-3 py-1.5 font-mono text-xs text-red-400 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+          >
+            Borrar claves
+          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-gray-700 px-4 py-2 font-mono text-xs text-gray-400 hover:bg-gray-800 hover:text-white"
+            >
+              Cerrar
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSave()}
+              disabled={saving || loading}
+              className="atlas-btn-cyan flex items-center px-5 py-2 font-mono text-xs disabled:opacity-50"
+            >
+              {saving && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
+              Guardar claves
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UpdateModal({
   isOpen,
   info,
@@ -788,6 +1128,11 @@ export function App() {
   const [updateProgress, setUpdateProgress] = useState(0);
   const [updateError, setUpdateError] = useState<string | null>(null);
 
+  // Metadatos y portadas
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [fetchingCovers, setFetchingCovers] = useState(false);
+  const [metadataProgress, setMetadataProgress] = useState<MetadataProgress | null>(null);
+
   const sagas = useMemo(() => groupBySaga(games), [games]);
 
   const platforms = useMemo(() => {
@@ -854,8 +1199,26 @@ export function App() {
         /* Sin listener el modal sigue funcionando sin barra de progreso. */
       });
 
+    let unlistenMetadata: (() => void) | undefined;
+    void listen<MetadataProgress>('atlas-metadata-progress', (event) => {
+      const progress = event.payload;
+      setMetadataProgress(progress);
+      setStatus(
+        `PORTADAS ${progress.processed}/${progress.total} · ${progress.name}${
+          progress.error ? ' · error' : ''
+        }`,
+      );
+    })
+      .then((stop) => {
+        unlistenMetadata = stop;
+      })
+      .catch(() => {
+        /* La descarga masiva también funciona sin barra de progreso. */
+      });
+
     return () => {
       unlisten?.();
+      unlistenMetadata?.();
     };
   }, []);
 
@@ -898,6 +1261,33 @@ export function App() {
       const message = error instanceof Error ? error.message : String(error);
       setUpdateError(message);
       setInstallingUpdate(false);
+    }
+  }
+
+  async function handleFetchCovers() {
+    setFetchingCovers(true);
+    setMetadataProgress(null);
+    setStatus('BUSCANDO PORTADAS FALTANTES...');
+    try {
+      const result = await invokeCmd<MetadataBulkResult>('fetch_missing_covers', { limit: 12 });
+      const list = await invokeCmd<Game[]>('list_games');
+      setGames(list);
+
+      if (result.total === 0) {
+        setStatus('TODAS LAS PORTADAS YA ESTÁN DESCARGADAS');
+      } else {
+        setStatus(
+          `PORTADAS: ${result.updated} ACTUALIZADAS · ${result.failed} CON ERROR${
+            result.failed > 0 ? ' (revisa las claves o los nombres)' : ''
+          }`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`ERROR DESCARGANDO PORTADAS: ${message}`);
+    } finally {
+      setFetchingCovers(false);
+      setMetadataProgress(null);
     }
   }
 
@@ -973,7 +1363,7 @@ export function App() {
   ];
 
   return (
-    <div className="flex min-h-screen flex-col bg-atlas-dark font-pixel text-white">
+    <div className="flex h-screen flex-col overflow-hidden bg-atlas-dark font-pixel text-white">
       {/* Barra superior */}
       <header className="sticky top-0 z-40 border-b border-gray-800 bg-black/70 backdrop-blur">
         <div className="flex items-center justify-between gap-4 px-6 py-4">
@@ -1113,7 +1503,35 @@ export function App() {
             </div>
 
             <div className="mt-auto border-t border-gray-800 pt-4">
-              <div className="flex items-start gap-2 font-mono text-[10px] leading-relaxed text-gray-500">
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => void handleFetchCovers()}
+                  disabled={fetchingCovers}
+                  className="flex w-full items-center justify-center gap-2 rounded border border-gray-700 bg-gray-900/80 px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-gray-300 hover:border-gray-500 hover:text-white disabled:opacity-50"
+                  title="Buscar carátulas y metadatos de los juegos sin portada"
+                >
+                  {fetchingCovers ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-neon-cyan" />
+                  ) : (
+                    <ImageDown className="h-3.5 w-3.5 text-neon-cyan" />
+                  )}
+                  {fetchingCovers
+                    ? `Portadas ${metadataProgress?.processed ?? 0}/${metadataProgress?.total ?? 12}`
+                    : 'Portadas automáticas'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="flex w-full items-center justify-center gap-2 rounded border border-gray-700 bg-gray-900/80 px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-gray-300 hover:border-gray-500 hover:text-white"
+                  title="Configurar claves de IGDB y SteamGridDB"
+                >
+                  <Settings className="h-3.5 w-3.5 text-neon-cyan" />
+                  Ajustes de metadatos
+                </button>
+              </div>
+
+              <div className="mt-3 flex items-start gap-2 font-mono text-[10px] leading-relaxed text-gray-500">
                 <Cpu className="mt-0.5 h-4 w-4 shrink-0" />
                 <span className="break-words">{status}</span>
               </div>
@@ -1350,6 +1768,9 @@ export function App() {
         onDelete={(id) => {
           setGames((prev) => prev.filter((g) => g.id !== id));
         }}
+        onMetadataFetched={(id, changes) => {
+          setGames((prev) => prev.map((g) => (g.id === id ? { ...g, ...changes } : g)));
+        }}
       />
 
       <AddGameModal
@@ -1359,6 +1780,8 @@ export function App() {
           void bootstrap(false);
         }}
       />
+
+      <MetadataSettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
 
       <UpdateModal
         isOpen={isUpdateModalOpen}

@@ -38,6 +38,10 @@ fn main() {
             commands::add_custom_game,
             commands::delete_game,
             commands::save_game_cover,
+            commands::fetch_game_metadata,
+            commands::fetch_missing_covers,
+            commands::get_metadata_settings,
+            commands::save_metadata_settings,
             commands::check_update,
             commands::install_update,
         ])
