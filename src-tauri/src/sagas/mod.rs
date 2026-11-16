@@ -145,6 +145,7 @@ mod tests {
             saga: None,
             console: Some("NES".to_string()),
             release_year: Some(1986),
+            cover_path: None,
         }
     }
 

@@ -97,8 +97,40 @@ pub fn load_saved_credentials() -> MetadataCredentials {
         .unwrap_or_default()
 }
 
+/// Carga variables de entorno desde un archivo .env si existe.
+fn load_env_file_if_present() {
+    let candidates = [
+        std::env::current_dir().ok().map(|d| d.join(".env")),
+        std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join(".env"))),
+        std::env::current_exe().ok().and_then(|e| e.parent().and_then(|p| p.parent()).map(|p| p.join(".env"))),
+        Some(config_dir().join(".env")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&candidate) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, val)) = trimmed.split_once('=') {
+                        let key = key.trim();
+                        let val = val.trim().trim_matches('"').trim_matches('\'');
+                        if !key.is_empty() && std::env::var(key).is_err() {
+                            std::env::set_var(key, val);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 /// Carga las credenciales guardadas, dando prioridad a las variables de entorno.
 pub fn load_credentials() -> MetadataCredentials {
+    load_env_file_if_present();
     let mut credentials = load_saved_credentials();
 
     if let Ok(value) = std::env::var("ATLAS_IGDB_CLIENT_ID") {
@@ -132,6 +164,106 @@ pub fn save_credentials(credentials: &MetadataCredentials) -> Result<(), String>
         .map_err(|e| format!("No se pudieron serializar las credenciales: {}", e))?;
     std::fs::write(&path, json)
         .map_err(|e| format!("No se pudieron guardar las credenciales: {}", e))
+}
+
+/// Normaliza y limpia el nombre del juego para mejorar el match en IGDB y SteamGridDB.
+pub fn clean_game_title(raw: &str) -> String {
+    let mut title = raw.trim().to_string();
+
+    // Eliminar extensiones ejecutables o de disco
+    for ext in &[".exe", ".lnk", ".url", ".iso", ".bin", ".cue", ".rom"] {
+        if title.to_lowercase().ends_with(ext) {
+            title.truncate(title.len() - ext.len());
+        }
+    }
+
+    // Quitar sufijos comunes de accesos directos
+    let lower = title.to_lowercase();
+    for suffix in &[
+        " - acceso directo",
+        " - shortcut",
+        " - epic games",
+        " - gog.com",
+    ] {
+        if lower.ends_with(suffix) {
+            title.truncate(title.len() - suffix.len());
+            break;
+        }
+    }
+
+    // Quitar sufijo "Launcher" si va pegado al nombre (ej. "XCOMLauncher" -> "XCOM")
+    if title.to_lowercase().ends_with("launcher") && title.len() > 8 {
+        title.truncate(title.len() - "launcher".len());
+    }
+
+    // Quitar patrones entre corchetes o paréntesis como [FitGirl Repack], (v1.0.4), (GOG), etc.
+    let mut cleaned = String::new();
+    let mut chars = title.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '[' || ch == '(' {
+            let close = if ch == '[' { ']' } else { ')' };
+            let mut inner = String::new();
+            let mut found_close = false;
+            for next_ch in chars.by_ref() {
+                if next_ch == close {
+                    found_close = true;
+                    break;
+                }
+                inner.push(next_ch);
+            }
+            if !found_close {
+                cleaned.push(ch);
+                cleaned.push_str(&inner);
+            } else {
+                let inner_lower = inner.to_lowercase();
+                // Si parece un año de lanzamiento de 4 dígitos (1980-2035), mantenerlo si ayuda
+                let is_year = inner.len() == 4 && inner.chars().all(|c| c.is_ascii_digit());
+                let is_tag = inner_lower.contains("v1")
+                    || inner_lower.contains("v2")
+                    || inner_lower.contains("v3")
+                    || inner_lower.contains("v0")
+                    || inner_lower.contains("repack")
+                    || inner_lower.contains("gog")
+                    || inner_lower.contains("steam")
+                    || inner_lower.contains("build")
+                    || inner_lower.contains("dodi")
+                    || inner_lower.contains("fitgirl")
+                    || inner_lower.contains("edition")
+                    || inner_lower.contains("multi")
+                    || inner_lower.contains("elamigos");
+
+                if !is_tag && is_year {
+                    cleaned.push(' ');
+                    cleaned.push_str(&inner);
+                }
+            }
+        } else {
+            cleaned.push(ch);
+        }
+    }
+
+    // Reemplazar guiones bajos o puntos continuos por espacios
+    let replaced: String = cleaned
+        .chars()
+        .map(|c| if c == '_' || c == '.' { ' ' } else { c })
+        .collect();
+
+    // Normalizar espacios en blanco
+    let mut words = Vec::new();
+    for word in replaced.split_whitespace() {
+        let w_lower = word.to_lowercase();
+        if w_lower == "launcher" || w_lower == "game" {
+            // Si el nombre tiene más palabras, ignorar "launcher" al final
+            continue;
+        }
+        words.push(word);
+    }
+
+    if words.is_empty() {
+        raw.trim().to_string()
+    } else {
+        words.join(" ")
+    }
 }
 
 /// Codifica un segmento de URL (evita depender de otra crate).
@@ -275,14 +407,16 @@ impl MetadataClient {
 
     /// Busca un juego en IGDB y devuelve sus metadatos.
     pub async fn search_igdb(&self, query: &str) -> Result<Option<GameMetadata>, String> {
-        if !self.has_igdb() || query.trim().is_empty() {
+        let cleaned_query = clean_game_title(query);
+        let target_query = if cleaned_query.is_empty() { query } else { &cleaned_query };
+        if !self.has_igdb() || target_query.trim().is_empty() {
             return Ok(None);
         }
 
         let token = self.igdb_token().await?;
         let client_id = self.credentials.igdb_client_id.clone().unwrap_or_default();
 
-        let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = target_query.replace('\\', "\\\\").replace('"', "\\\"");
         let body = format!(
             "search \"{}\"; fields name,first_release_date,cover.url,cover.image_id,genres.name,platforms.name,total_rating; limit 3;",
             escaped
@@ -345,7 +479,9 @@ impl MetadataClient {
 
     /// Busca carátula, banner y logo en SteamGridDB.
     pub async fn search_steamgriddb(&self, game_name: &str) -> Result<Option<Artwork>, String> {
-        if !self.has_steamgriddb() || game_name.trim().is_empty() {
+        let cleaned_name = clean_game_title(game_name);
+        let target_name = if cleaned_name.is_empty() { game_name } else { &cleaned_name };
+        if !self.has_steamgriddb() || target_name.trim().is_empty() {
             return Ok(None);
         }
 
@@ -358,19 +494,20 @@ impl MetadataClient {
         let search_url = format!(
             "{}/search/autocomplete/{}",
             STEAMGRIDDB_BASE,
-            encode_segment(game_name)
+            encode_segment(target_name)
         );
         let results: SgdbResponse<SgdbGame> = self.sgdb_get(&search_url, &api_key).await?;
 
         let candidates = results.data.unwrap_or_default();
-        let wanted = game_name.trim();
+        let wanted = target_name.trim();
+        let raw_wanted = game_name.trim();
         let game = candidates
             .iter()
             .find(|candidate| {
                 candidate
                     .name
                     .as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(wanted))
+                    .is_some_and(|name| name.eq_ignore_ascii_case(wanted) || name.eq_ignore_ascii_case(raw_wanted))
             })
             .or_else(|| candidates.first());
 
@@ -453,6 +590,63 @@ impl MetadataClient {
             .json()
             .await
             .map_err(|e| format!("Respuesta de SteamGridDB inválida: {}", e))
+    }
+
+    pub async fn search_steam_store(&self, game_name: &str) -> Result<Option<Artwork>, String> {
+        let cleaned = clean_game_title(game_name);
+        let target = if cleaned.is_empty() { game_name } else { &cleaned };
+        let url = format!(
+            "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
+            encode_segment(target)
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .await
+            .map_err(|e| format!("Error consultando Steam Store: {}", e))?;
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        #[derive(Deserialize)]
+        struct SteamItem {
+            id: u64,
+        }
+        #[derive(Deserialize)]
+        struct SteamSearchResponse {
+            #[serde(default)]
+            items: Vec<SteamItem>,
+        }
+
+        let data: SteamSearchResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Respuesta inválida de Steam Store: {}", e))?;
+
+        let Some(first) = data.items.first() else {
+            return Ok(None);
+        };
+
+        let appid = first.id;
+        let cdn_600x900 = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg", appid);
+        let cdn_header = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", appid);
+
+        let test_resp = self.client.head(&cdn_600x900).send().await;
+        let cover_url = if test_resp.is_ok_and(|r| r.status().is_success()) {
+            Some(cdn_600x900)
+        } else {
+            Some(cdn_header)
+        };
+
+        Ok(Some(Artwork {
+            cover_url,
+            banner_url: None,
+            logo_url: None,
+        }))
     }
 
     /// Descarga una imagen y la convierte a WebP dentro de la caché de portadas.
@@ -624,6 +818,15 @@ mod tests {
         assert_eq!(&bytes[8..12], b"WEBP");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cleans_game_title() {
+        assert_eq!(clean_game_title("XCOMLauncher.exe"), "XCOM");
+        assert_eq!(clean_game_title("DragonAge2Launcher.exe"), "DragonAge2");
+        assert_eq!(clean_game_title("Hollow Knight - Acceso directo"), "Hollow Knight");
+        assert_eq!(clean_game_title("Cyberpunk 2077 [FitGirl Repack]"), "Cyberpunk 2077");
+        assert_eq!(clean_game_title("The_Witcher_3_Wild_Hunt.exe"), "The Witcher 3 Wild Hunt");
     }
 
     #[test]

@@ -291,14 +291,18 @@ pub async fn save_games(pool: &SqlitePool, games: &[DetectedGame]) -> Result<usi
             r#"
             INSERT INTO games (
                 uuid, name, saga_id, platform_id, executable_path, rom_iso_path,
-                is_emulated, console, release_year, installed, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, CURRENT_TIMESTAMP)
+                cover_path, is_emulated, console, release_year, installed, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, CURRENT_TIMESTAMP)
             ON CONFLICT(uuid) DO UPDATE SET
                 name = excluded.name,
                 saga_id = excluded.saga_id,
                 platform_id = excluded.platform_id,
                 executable_path = excluded.executable_path,
                 rom_iso_path = excluded.rom_iso_path,
+                cover_path = CASE
+                    WHEN games.cover_path IS NOT NULL AND TRIM(games.cover_path) != '' THEN games.cover_path
+                    ELSE excluded.cover_path
+                END,
                 is_emulated = excluded.is_emulated,
                 console = excluded.console,
                 release_year = excluded.release_year,
@@ -312,6 +316,7 @@ pub async fn save_games(pool: &SqlitePool, games: &[DetectedGame]) -> Result<usi
         .bind(platform_id)
         .bind(&executable)
         .bind(game.rom_iso_path.as_deref())
+        .bind(game.cover_path.as_deref())
         .bind(game.rom_iso_path.is_some())
         .bind(&game.console)
         .bind(game.release_year)

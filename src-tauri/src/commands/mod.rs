@@ -119,6 +119,19 @@ async fn enrich_game(
         }
     }
 
+    // Si no hay portada de IGDB o SteamGridDB, consultar Steam Store (público y sin credenciales)
+    if artwork.as_ref().and_then(|a| a.cover_url.as_ref()).is_none()
+        && info.as_ref().and_then(|m| m.cover_url.as_ref()).is_none()
+    {
+        if let Ok(Some(steam_art)) = client.search_steam_store(name).await {
+            if artwork.is_none() {
+                artwork = Some(steam_art);
+            } else if let Some(ref mut art) = artwork {
+                art.cover_url = steam_art.cover_url;
+            }
+        }
+    }
+
     if info.is_none() && artwork.is_none() {
         return Err(if warnings.is_empty() {
             format!("Sin resultados para \"{}\"", name)
@@ -215,6 +228,47 @@ async fn enrich_game(
 }
 
 
+/// Lanza la descarga automática de portadas en segundo plano.
+pub fn trigger_background_metadata_fetch(app: AppHandle, pool: sqlx::SqlitePool) {
+    let client = metadata::MetadataClient::new(covers_dir(&app));
+
+    tauri::async_runtime::spawn(async move {
+        // Obtenemos los juegos sin carátula (hasta 100 de forma continua y gradual)
+        let targets = match database::list_games_without_cover(&pool, 100).await {
+            Ok(list) => list,
+            Err(_) => return,
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let total = targets.len();
+        for (idx, (game_id, name)) in targets.into_iter().enumerate() {
+            let outcome = enrich_game(&client, &pool, game_id, &name).await;
+            let (cover_path, error) = match outcome {
+                Ok(fetched) => (fetched.cover_path, None),
+                Err(err) => (None, Some(err)),
+            };
+
+            let _ = app.emit(
+                METADATA_PROGRESS_EVENT,
+                MetadataProgress {
+                    processed: idx + 1,
+                    total,
+                    game_id,
+                    name,
+                    cover_path,
+                    error,
+                },
+            );
+
+            // Pausa breve para evitar saturar rate limits de las APIs
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    });
+}
+
 /// Comando: Inicializar base de datos
 #[command]
 pub async fn init_database(state: State<'_, DbState>) -> Result<String, String> {
@@ -226,7 +280,7 @@ pub async fn init_database(state: State<'_, DbState>) -> Result<String, String> 
 
 /// Comando: Ejecutar escaneo completo y guardar resultados
 #[command]
-pub async fn scan_libraries(state: State<'_, DbState>) -> Result<ScanResult, String> {
+pub async fn scan_libraries(app: AppHandle, state: State<'_, DbState>) -> Result<ScanResult, String> {
     let outcome = tokio::task::spawn_blocking(scanners::full_scan)
         .await
         .map_err(|e| format!("Error en escaneo: {}", e))?;
@@ -238,7 +292,11 @@ pub async fn scan_libraries(state: State<'_, DbState>) -> Result<ScanResult, Str
 
     let mut result = outcome.result;
     match database::save_games(pool, &outcome.games).await {
-        Ok(saved) => result.games_found = saved,
+        Ok(saved) => {
+            result.games_found = saved;
+            // Enriquecer automáticamente portadas y metadatos en segundo plano
+            trigger_background_metadata_fetch(app, pool.clone());
+        }
         Err(e) => result
             .errors
             .push(format!("No se pudo guardar el escaneo: {}", e)),
@@ -286,6 +344,7 @@ pub async fn get_games_by_saga(state: State<'_, DbState>) -> Result<GroupingResu
             saga: row.saga,
             console: row.console,
             release_year: row.release_year,
+            cover_path: row.cover_path,
         })
         .collect();
 
@@ -509,6 +568,7 @@ pub fn get_metadata_settings() -> MetadataSettingsView {
 /// Comando: Guardar las claves de IGDB/SteamGridDB
 #[command]
 pub fn save_metadata_settings(
+    app: AppHandle,
     igdb_client_id: Option<String>,
     igdb_client_secret: Option<String>,
     steamgriddb_api_key: Option<String>,
@@ -534,6 +594,18 @@ pub fn save_metadata_settings(
     }
 
     metadata::save_credentials(&credentials)?;
+
+    // Si se acaban de guardar credenciales válidas, iniciar descarga en segundo plano automáticamente
+    if credentials.is_configured() {
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app_handle.state::<DbState>();
+            if let Ok(pool) = state.pool().await {
+                trigger_background_metadata_fetch(app_handle.clone(), pool.clone());
+            }
+        });
+    }
+
     Ok(settings_view())
 }
 
@@ -612,4 +684,46 @@ pub async fn install_update(
     expected_digest: Option<String>,
 ) -> Result<String, String> {
     updater::download_and_install(app, &download_url, &asset_name, expected_digest.as_deref()).await
+}
+
+/// Comando: Activar o desactivar el modo Big Picture (pantalla completa).
+/// Devuelve el estado real de la ventana después del cambio.
+#[command]
+pub fn set_fullscreen(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "No se encontró la ventana principal".to_string())?;
+
+    window
+        .set_fullscreen(enabled)
+        .map_err(|e| format!("No se pudo cambiar el modo de pantalla: {e}"))?;
+
+    window
+        .is_fullscreen()
+        .map_err(|e| format!("No se pudo leer el estado de la ventana: {e}"))
+}
+
+/// Comando: Cambiar el tamaño de la ventana
+#[command]
+pub fn set_window_size(app: AppHandle, width: u32, height: u32) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "No se encontró la ventana principal".to_string())?;
+
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+
+    let scale = monitor.map(|m| m.scale_factor()).unwrap_or(1.0);
+    let phys_width = (width as f64 * scale).round() as u32;
+    let phys_height = (height as f64 * scale).round() as u32;
+
+    window
+        .set_size(tauri::PhysicalSize::new(phys_width, phys_height))
+        .map_err(|e| format!("No se pudo redimensionar la ventana: {e}"))?;
+
+    let _ = window.center();
+    Ok(())
 }
