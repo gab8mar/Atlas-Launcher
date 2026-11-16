@@ -1,20 +1,31 @@
 import { useEffect, useMemo, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
+import { listen } from '@tauri-apps/api/event';
 import {
   BookOpen,
+  CheckCircle2,
   Cpu,
+  Download,
   Edit3,
-  FolderOpen,
   Gamepad2,
-  Heart,
-  Image as ImageIcon,
+  Globe,
+  ImageDown,
   LayoutGrid,
   List as ListIcon,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  Moon,
+  Monitor,
   Play,
   Plus,
   RefreshCw,
   Search,
+  Settings,
+  Sliders,
   Sparkles,
+  Sun,
   Trash2,
   X,
 } from 'lucide-react';
@@ -48,6 +59,61 @@ interface ScanResult {
   emulators_found: number;
   platforms_scanned: string[];
   errors: string[];
+}
+
+interface UpdateInfo {
+  available: boolean;
+  current_version: string;
+  latest_version: string;
+  release_name: string | null;
+  release_notes: string | null;
+  published_at: string | null;
+  html_url: string | null;
+  asset_name: string | null;
+  download_url: string | null;
+  asset_size: number | null;
+  digest: string | null;
+}
+
+interface UpdateProgress {
+  downloaded: number;
+  total: number;
+  percent: number;
+}
+
+interface MetadataSettings {
+  igdb_client_id: string | null;
+  igdb_configured: boolean;
+  steamgriddb_configured: boolean;
+  credentials_path: string;
+}
+
+interface MetadataResult {
+  game_id: number;
+  source: string | null;
+  release_year: number | null;
+  console: string | null;
+  genre: string | null;
+  rating: number | null;
+  cover_path: string | null;
+  banner_path: string | null;
+  logo_path: string | null;
+  warnings: string[];
+}
+
+interface MetadataProgress {
+  processed: number;
+  total: number;
+  game_id: number;
+  name: string;
+  cover_path: string | null;
+  error: string | null;
+}
+
+interface MetadataBulkResult {
+  total: number;
+  updated: number;
+  failed: number;
 }
 
 type View = 'catalog' | 'list' | 'sagas';
@@ -156,23 +222,23 @@ function Poster({ game, className }: { game: Game; className?: string }) {
         className ?? ''
       }`}
     >
-      <div className="flex items-center justify-between text-gray-500">
-        <Gamepad2 className="h-5 w-5 text-gray-400/60" />
-        <span className="font-mono text-[9px] uppercase tracking-wider text-gray-400">
+      <div className="flex items-center justify-between text-gray-200">
+        <Gamepad2 className="h-5 w-5 text-gray-200" />
+        <span className="font-mono text-[9px] font-semibold uppercase tracking-wider text-gray-200">
           {game.console || 'PC'}
         </span>
       </div>
 
       <div>
-        <p className="line-clamp-3 text-xs font-bold leading-tight text-white drop-shadow">
+        <p className="line-clamp-3 text-xs font-bold leading-tight text-white drop-shadow-md">
           {game.name}
         </p>
         {game.release_year && (
-          <p className="mt-1 font-mono text-[10px] text-gray-400">{game.release_year}</p>
+          <p className="mt-1 font-mono text-[10px] text-gray-200">{game.release_year}</p>
         )}
       </div>
 
-      <div className="font-mono text-[8px] uppercase tracking-widest text-gray-500">
+      <div className="font-mono text-[9px] font-semibold uppercase tracking-widest text-gray-200">
         {PLATFORM_LABELS[game.platform] || game.platform}
       </div>
     </div>
@@ -187,9 +253,17 @@ interface EditModalProps {
   onClose: () => void;
   onSave: (updated: Game) => void;
   onDelete: (id: number) => void;
+  onMetadataFetched: (id: number, changes: Partial<Game>) => void;
 }
 
-function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalProps) {
+function EditGameModal({
+  game,
+  isOpen,
+  onClose,
+  onSave,
+  onDelete,
+  onMetadataFetched,
+}: EditModalProps) {
   const [name, setName] = useState('');
   const [saga, setSaga] = useState('');
   const [releaseYear, setReleaseYear] = useState<string>('');
@@ -198,6 +272,9 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
   const [args, setArgs] = useState('');
   const [coverPath, setCoverPath] = useState('');
   const [saving, setSaving] = useState(false);
+  const [fetchingMeta, setFetchingMeta] = useState(false);
+  const [metaMessage, setMetaMessage] = useState<string | null>(null);
+  const [metaError, setMetaError] = useState(false);
 
   useEffect(() => {
     if (game) {
@@ -208,10 +285,54 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
       setExecutablePath(game.executable_path || '');
       setArgs(game.arguments || '');
       setCoverPath(game.cover_path || '');
+      setMetaMessage(null);
+      setMetaError(false);
     }
   }, [game]);
 
   if (!isOpen || !game) return null;
+
+  async function handleFetchMetadata() {
+    if (!game) return;
+    setFetchingMeta(true);
+    setMetaMessage(null);
+    setMetaError(false);
+    try {
+      const result = await invokeCmd<MetadataResult>('fetch_game_metadata', {
+        gameId: game.id,
+      });
+
+      if (result.release_year) setReleaseYear(String(result.release_year));
+      if (result.console) setConsoleName(result.console);
+      if (result.cover_path) setCoverPath(result.cover_path);
+
+      onMetadataFetched(game.id, {
+        cover_path: result.cover_path ?? game.cover_path,
+        release_year: result.release_year ?? game.release_year,
+        console: result.console ?? game.console,
+      });
+
+      const details = [
+        result.source ? `fuente ${result.source.toUpperCase()}` : null,
+        result.genre ?? null,
+        result.rating ? `${result.rating.toFixed(1)}/100` : null,
+      ].filter(Boolean);
+
+      setMetaMessage(
+        details.length > 0
+          ? `Metadatos encontrados · ${details.join(' · ')}`
+          : 'Metadatos encontrados',
+      );
+      if (result.warnings.length > 0) {
+        console.warn('Avisos de metadatos:', result.warnings);
+      }
+    } catch (err) {
+      setMetaError(true);
+      setMetaMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFetchingMeta(false);
+    }
+  }
 
   async function handleSave() {
     if (!game) return;
@@ -357,9 +478,25 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
           </div>
 
           <div>
-            <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
-              Carátula (URL web o ruta local de imagen)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="block font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                Carátula (URL web o ruta local de imagen)
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleFetchMetadata()}
+                disabled={fetchingMeta}
+                className="flex items-center gap-1 rounded border border-neon-cyan/50 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-neon-cyan hover:bg-neon-cyan/10 disabled:opacity-50"
+                title="Buscar metadatos y portada en IGDB / SteamGridDB"
+              >
+                {fetchingMeta ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3 w-3" />
+                )}
+                {fetchingMeta ? 'Buscando...' : 'Buscar automático'}
+              </button>
+            </div>
             <div className="mt-1 flex gap-2">
               <input
                 type="text"
@@ -369,6 +506,15 @@ function EditGameModal({ game, isOpen, onClose, onSave, onDelete }: EditModalPro
                 className="atlas-input flex-1 text-xs"
               />
             </div>
+            {metaMessage && (
+              <p
+                className={`mt-2 font-mono text-[10px] leading-relaxed ${
+                  metaError ? 'text-red-400' : 'text-neon-cyan'
+                }`}
+              >
+                {metaMessage}
+              </p>
+            )}
           </div>
         </div>
 
@@ -586,6 +732,615 @@ function AddGameModal({ isOpen, onClose, onAdded }: AddGameModalProps) {
   );
 }
 
+/* -------------------------- Modal Actualización ------------------ */
+
+interface UpdateModalProps {
+  isOpen: boolean;
+  info: UpdateInfo | null;
+  error: string | null;
+  installing: boolean;
+  progress: number;
+  onClose: () => void;
+  onInstall: () => void;
+  onRetry: () => void;
+}
+
+/* -------------------------- Modal Ajustes ------------------------ */
+
+interface MetadataSettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+function MetadataSettingsModal({ isOpen, onClose }: MetadataSettingsModalProps) {
+  const [igdbClientId, setIgdbClientId] = useState('');
+  const [igdbClientSecret, setIgdbClientSecret] = useState('');
+  const [steamgriddbApiKey, setSteamgriddbApiKey] = useState('');
+  const [settings, setSettings] = useState<MetadataSettings | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    setMessage(null);
+    setError(false);
+    setIgdbClientSecret('');
+    setSteamgriddbApiKey('');
+    setLoading(true);
+
+    void invokeCmd<MetadataSettings>('get_metadata_settings')
+      .then((value) => {
+        setSettings(value);
+        setIgdbClientId(value.igdb_client_id || '');
+      })
+      .catch((err) => {
+        setError(true);
+        setMessage(err instanceof Error ? err.message : String(err));
+        setSettings(null);
+      })
+      .finally(() => setLoading(false));
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  async function handleSave() {
+    setSaving(true);
+    setMessage(null);
+    setError(false);
+    try {
+      const value = await invokeCmd<MetadataSettings>('save_metadata_settings', {
+        igdbClientId: igdbClientId.trim() || null,
+        igdbClientSecret: igdbClientSecret.trim() || null,
+        steamgriddbApiKey: steamgriddbApiKey.trim() || null,
+        clear: false,
+      });
+      setSettings(value);
+      setIgdbClientSecret('');
+      setSteamgriddbApiKey('');
+      setMessage('Claves guardadas. Las conexiones con las APIs ahora descargan metadatos automáticamente en segundo plano.');
+      void bootstrap(false);
+    } catch (err) {
+      setError(true);
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleClear() {
+    if (!confirm('¿Borrar las claves de IGDB y SteamGridDB guardadas en este equipo?')) return;
+    setSaving(true);
+    setMessage(null);
+    setError(false);
+    try {
+      const value = await invokeCmd<MetadataSettings>('save_metadata_settings', {
+        igdbClientId: null,
+        igdbClientSecret: null,
+        steamgriddbApiKey: null,
+        clear: true,
+      });
+      setSettings(value);
+      setIgdbClientId('');
+      setIgdbClientSecret('');
+      setSteamgriddbApiKey('');
+      setMessage('Claves eliminadas.');
+    } catch (err) {
+      setError(true);
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Settings className="h-5 w-5 text-neon-cyan" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              Ajustes de metadatos
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <p className="mt-4 font-mono text-[10px] leading-relaxed text-gray-300">
+          IGDB aporta año, género, nota y carátula; SteamGridDB aporta carátula vertical, banner
+          y logo. Las claves se guardan solo en este equipo. Deja un campo vacío para conservar
+          la clave ya guardada.
+        </p>
+
+        {loading ? (
+          <div className="mt-6 flex items-center gap-2 font-mono text-xs text-gray-400">
+            <Loader2 className="h-4 w-4 animate-spin" /> Cargando ajustes...
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block font-mono text-[10px] uppercase tracking-wider text-gray-400">
+                  IGDB Client ID
+                </label>
+                <input
+                  type="text"
+                  value={igdbClientId}
+                  onChange={(e) => setIgdbClientId(e.target.value)}
+                  placeholder="xxxxxxxxxxxxxxxx"
+                  className="atlas-input mt-1 w-full text-xs"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-[10px] uppercase tracking-wider text-gray-400">
+                  IGDB Client Secret
+                </label>
+                <input
+                  type="password"
+                  value={igdbClientSecret}
+                  onChange={(e) => setIgdbClientSecret(e.target.value)}
+                  placeholder={settings?.igdb_configured ? '•••••• (guardado)' : 'sin configurar'}
+                  className="atlas-input mt-1 w-full text-xs"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block font-mono text-[10px] uppercase tracking-wider text-gray-400">
+                SteamGridDB API Key
+              </label>
+              <input
+                type="password"
+                value={steamgriddbApiKey}
+                onChange={(e) => setSteamgriddbApiKey(e.target.value)}
+                placeholder={settings?.steamgriddb_configured ? '•••••• (guardada)' : 'sin configurar'}
+                className="atlas-input mt-1 w-full text-xs"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-3 font-mono text-[10px] text-gray-300">
+              <span className={settings?.igdb_configured ? 'text-neon-cyan' : ''}>
+                IGDB: {settings?.igdb_configured ? 'configurado' : 'pendiente'}
+              </span>
+              <span className={settings?.steamgriddb_configured ? 'text-neon-cyan' : ''}>
+                SteamGridDB: {settings?.steamgriddb_configured ? 'configurado' : 'pendiente'}
+              </span>
+            </div>
+
+            <div className="rounded border border-gray-800 bg-black/30 p-3 font-mono text-[9px] leading-relaxed text-gray-300">
+              <p>IGDB: dev.twitch.tv/console/apps · api-docs.igdb.com</p>
+              <p>SteamGridDB: steamgriddb.com/profile/preferences/api</p>
+              <p className="mt-1 break-all text-gray-400">{settings?.credentials_path}</p>
+            </div>
+          </div>
+        )}
+
+        {message && (
+          <p
+            className={`mt-4 rounded border p-3 font-mono text-[10px] leading-relaxed ${
+              error
+                ? 'border-red-500/40 bg-red-500/10 text-red-300'
+                : 'border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan'
+            }`}
+          >
+            {message}
+          </p>
+        )}
+
+        <div className="mt-6 flex items-center justify-between border-t border-gray-800 pt-4">
+          <button
+            type="button"
+            onClick={() => void handleClear()}
+            disabled={saving}
+            className="rounded px-3 py-1.5 font-mono text-xs text-red-400 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+          >
+            Borrar claves
+          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-gray-700 px-4 py-2 font-mono text-xs text-gray-400 hover:bg-gray-800 hover:text-white"
+            >
+              Cerrar
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSave()}
+              disabled={saving || loading}
+              className="atlas-btn-cyan flex items-center px-5 py-2 font-mono text-xs disabled:opacity-50"
+            >
+              {saving && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
+              Guardar claves
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface GeneralSettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  lang: 'es' | 'en';
+  setLang: (l: 'es' | 'en') => void;
+  theme: 'dark' | 'light';
+  setTheme: (t: 'dark' | 'light') => void;
+  isFullscreen: boolean;
+  onToggleFullscreen: () => void;
+  onResizeWindow: (w: number, h: number) => void;
+  onOpenMetadataSettings: () => void;
+  onCheckUpdate: () => void;
+  checkingUpdate: boolean;
+  updateAvailable?: boolean;
+}
+
+function GeneralSettingsModal({
+  isOpen,
+  onClose,
+  lang,
+  setLang,
+  theme,
+  setTheme,
+  isFullscreen,
+  onToggleFullscreen,
+  onResizeWindow,
+  onOpenMetadataSettings,
+  onCheckUpdate,
+  checkingUpdate,
+  updateAvailable,
+}: GeneralSettingsModalProps) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Sliders className="h-5 w-5 text-neon-pink" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              {lang === 'es' ? 'Configuración General' : 'General Settings'}
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-5">
+          {/* Idioma */}
+          <div>
+            <label className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-neon-cyan">
+              <Globe className="h-4 w-4" />
+              {lang === 'es' ? 'Idioma de la Interfaz' : 'Interface Language'}
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setLang('es')}
+                className={`rounded border px-4 py-2 font-mono text-xs font-bold transition-colors ${
+                  lang === 'es'
+                    ? 'border-neon-pink bg-neon-pink text-black'
+                    : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-gray-500 hover:text-white'
+                }`}
+              >
+                Español (ES)
+              </button>
+              <button
+                type="button"
+                onClick={() => setLang('en')}
+                className={`rounded border px-4 py-2 font-mono text-xs font-bold transition-colors ${
+                  lang === 'en'
+                    ? 'border-neon-pink bg-neon-pink text-black'
+                    : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-gray-500 hover:text-white'
+                }`}
+              >
+                English (EN)
+              </button>
+            </div>
+          </div>
+
+          {/* Tema */}
+          <div>
+            <label className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-neon-cyan">
+              {theme === 'dark' ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+              {lang === 'es' ? 'Tema Visual' : 'Visual Theme'}
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setTheme('dark')}
+                className={`flex items-center justify-center gap-2 rounded border px-4 py-2 font-mono text-xs font-bold transition-colors ${
+                  theme === 'dark'
+                    ? 'border-neon-cyan bg-neon-cyan text-black'
+                    : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-gray-500 hover:text-white'
+                }`}
+              >
+                <Moon className="h-3.5 w-3.5" />
+                {lang === 'es' ? 'Modo Oscuro Cyber' : 'Cyber Dark'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setTheme('light')}
+                className={`flex items-center justify-center gap-2 rounded border px-4 py-2 font-mono text-xs font-bold transition-colors ${
+                  theme === 'light'
+                    ? 'border-neon-cyan bg-neon-cyan text-black'
+                    : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-gray-500 hover:text-white'
+                }`}
+              >
+                <Sun className="h-3.5 w-3.5" />
+                {lang === 'es' ? 'Modo Claro Neón' : 'Neon Light'}
+              </button>
+            </div>
+          </div>
+
+          {/* Tamaño de Ventana y Pantalla Completa */}
+          <div>
+            <label className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-neon-cyan">
+              <Monitor className="h-4 w-4" />
+              {lang === 'es' ? 'Tamaño de Ventana y Pantalla' : 'Window Size & Display'}
+            </label>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => onResizeWindow(1280, 760)}
+                className="rounded border border-gray-700 bg-gray-900/80 px-2 py-2 font-mono text-[11px] text-gray-300 hover:border-neon-pink hover:text-white"
+              >
+                1280 × 760
+              </button>
+              <button
+                type="button"
+                onClick={() => onResizeWindow(1440, 840)}
+                className="rounded border border-gray-700 bg-gray-900/80 px-2 py-2 font-mono text-[11px] text-gray-300 hover:border-neon-pink hover:text-white"
+              >
+                1440 × 840
+              </button>
+              <button
+                type="button"
+                onClick={() => onResizeWindow(1600, 840)}
+                className="rounded border border-gray-700 bg-gray-900/80 px-2 py-2 font-mono text-[11px] text-gray-300 hover:border-neon-pink hover:text-white"
+              >
+                1600 × 840
+              </button>
+            </div>
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={onToggleFullscreen}
+                className={`flex w-full items-center justify-center gap-2 rounded border px-4 py-2.5 font-mono text-xs font-bold transition-colors ${
+                  isFullscreen
+                    ? 'border-neon-pink bg-neon-pink/20 text-neon-pink hover:bg-neon-pink/30'
+                    : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-neon-cyan hover:text-white'
+                }`}
+              >
+                {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4 text-neon-cyan" />}
+                {isFullscreen
+                  ? lang === 'es' ? 'Salir del Modo Big Picture (F11 / Esc)' : 'Exit Big Picture (F11 / Esc)'
+                  : lang === 'es' ? 'Activar Modo Big Picture (Pantalla Completa F11)' : 'Enter Big Picture (Fullscreen F11)'}
+              </button>
+            </div>
+          </div>
+
+          {/* Actualizaciones del Sistema */}
+          <div className="border-t border-gray-800 pt-3">
+            <label className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-neon-cyan">
+              <Download className="h-4 w-4" />
+              {lang === 'es' ? 'Actualizaciones de la Aplicación' : 'Application Updates'}
+            </label>
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onCheckUpdate();
+                }}
+                disabled={checkingUpdate}
+                className={`flex w-full items-center justify-center gap-2 rounded border px-4 py-2.5 font-mono text-xs font-bold transition-colors disabled:opacity-50 ${
+                  updateAvailable
+                    ? 'border-neon-pink bg-neon-pink/15 text-neon-pink hover:bg-neon-pink/25'
+                    : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-neon-cyan hover:text-white'
+                }`}
+              >
+                <Download className={`h-4 w-4 ${checkingUpdate ? 'animate-bounce' : ''}`} />
+                {checkingUpdate
+                  ? lang === 'es' ? 'BUSCANDO ACTUALIZACIONES...' : 'CHECKING FOR UPDATES...'
+                  : updateAvailable
+                    ? lang === 'es' ? '¡NUEVA VERSIÓN DISPONIBLE! ACTUALIZAR' : 'NEW VERSION AVAILABLE! UPDATE'
+                    : lang === 'es' ? 'BUSCAR ACTUALIZACIONES DE ATLAS' : 'CHECK FOR ATLAS UPDATES'}
+              </button>
+            </div>
+          </div>
+
+          {/* Acceso a APIs de Metadatos */}
+          <div className="border-t border-gray-800 pt-3">
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenMetadataSettings();
+              }}
+              className="flex w-full items-center justify-between rounded border border-gray-700 bg-gray-900/60 px-4 py-2.5 font-mono text-xs text-gray-300 hover:border-neon-cyan hover:text-white"
+            >
+              <div className="flex items-center gap-2">
+                <Settings className="h-4 w-4 text-neon-cyan" />
+                <span>{lang === 'es' ? 'Ajustes avanzados de APIs (IGDB / SteamGridDB)' : 'Advanced APIs (IGDB / SteamGridDB)'}</span>
+              </div>
+              <span className="text-neon-cyan">→</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-6 flex justify-end border-t border-gray-800 pt-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="atlas-btn-cyan px-6 py-2 font-mono text-xs"
+          >
+            {lang === 'es' ? 'Listo' : 'Done'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UpdateModal({
+  isOpen,
+  info,
+  error,
+  installing,
+  progress,
+  onClose,
+  onInstall,
+  onRetry,
+}: UpdateModalProps) {
+  if (!isOpen) return null;
+
+  const canInstall = Boolean(info?.available && info.download_url && info.asset_name);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-xl border border-gray-700 bg-atlas-panel p-6 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Download className="h-5 w-5 text-neon-cyan" />
+            <h3 className="text-lg font-bold uppercase tracking-wider text-white">
+              Actualización de Atlas Launcher
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={installing}
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-40"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-4">
+          {error && (
+            <div className="rounded border border-red-500/40 bg-red-500/10 p-3 font-mono text-xs text-red-300">
+              {error}
+            </div>
+          )}
+
+          {!error && !info && (
+            <p className="font-mono text-sm text-gray-400">Consultando GitHub Releases...</p>
+          )}
+
+          {info && !info.available && (
+            <div className="flex items-start gap-3 rounded border border-green-500/30 bg-green-500/10 p-4">
+              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-green-400" />
+              <div>
+                <p className="text-sm font-bold text-white">Estás al día</p>
+                <p className="mt-1 font-mono text-xs text-gray-400">
+                  Atlas Launcher v{info.current_version} es la última versión disponible.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {info && info.available && (
+            <>
+              <div className="flex items-center justify-between rounded border border-gray-800 bg-black/30 p-3 font-mono text-xs">
+                <span className="text-gray-400">
+                  Versión actual: <span className="text-white">v{info.current_version}</span>
+                </span>
+                <span className="text-gray-400">
+                  Nueva versión: <span className="text-neon-pink">v{info.latest_version}</span>
+                </span>
+              </div>
+
+              {info.release_notes && (
+                <div>
+                  <p className="mb-1 font-mono text-[11px] uppercase tracking-wider text-gray-400">
+                    Notas del release
+                  </p>
+                  <pre className="scrollbar-hide max-h-40 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-gray-300">
+                    {info.release_notes}
+                  </pre>
+                </div>
+              )}
+
+              {!info.download_url && (
+                <p className="font-mono text-xs text-yellow-400">
+                  El release no incluye un instalador compatible (.exe/.msi). Descárgalo manualmente
+                  desde GitHub.
+                </p>
+              )}
+
+              {installing && (
+                <div>
+                  <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-gray-400">
+                    <span>Descargando actualización...</span>
+                    <span className="text-neon-cyan">{progress}%</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-800">
+                    <div
+                      className="h-full rounded-full bg-neon-cyan transition-all"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 font-mono text-[10px] text-gray-300">
+                    La aplicación se cerrará para completar la instalación.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-gray-800 pt-4">
+          {error ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="atlas-btn-cyan px-5 py-2 font-mono text-xs"
+            >
+              Reintentar
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={installing}
+                className="rounded border border-gray-700 px-4 py-2 font-mono text-xs text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-40"
+              >
+                {info?.available ? 'Más tarde' : 'Cerrar'}
+              </button>
+              {canInstall && (
+                <button
+                  type="button"
+                  onClick={onInstall}
+                  disabled={installing}
+                  className="atlas-btn-cyan px-5 py-2 font-mono text-xs disabled:opacity-50"
+                >
+                  {installing ? 'Instalando...' : 'Descargar e instalar'}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------------- Aplicación --------------------------- */
 
 export function App() {
@@ -600,6 +1355,50 @@ export function App() {
   // Modales
   const [editingGame, setEditingGame] = useState<Game | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  // Actualizaciones
+  const [appVersion, setAppVersion] = useState('1.0.0');
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  // Metadatos y portadas
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [fetchingCovers, setFetchingCovers] = useState(false);
+  const [metadataProgress, setMetadataProgress] = useState<MetadataProgress | null>(null);
+
+  // Ventana / Modo Big Picture
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Ajustes de Interfaz
+  const [isGeneralSettingsOpen, setIsGeneralSettingsOpen] = useState(false);
+  const [lang, setLang] = useState<'es' | 'en'>(() => {
+    return (localStorage.getItem('atlas_lang') as 'es' | 'en') || 'es';
+  });
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    return (localStorage.getItem('atlas_theme') as 'dark' | 'light') || 'dark';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('atlas_lang', lang);
+  }, [lang]);
+
+  useEffect(() => {
+    localStorage.setItem('atlas_theme', theme);
+  }, [theme]);
+
+  async function handleResizeWindow(width: number, height: number) {
+    try {
+      await invokeCmd('set_window_size', { width, height });
+      setStatus(`TAMAÑO DE VENTANA AJUSTADO A ${width}x${height}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus(`ERROR AJUSTANDO TAMAÑO: ${msg}`);
+    }
+  }
 
   const sagas = useMemo(() => groupBySaga(games), [games]);
 
@@ -648,6 +1447,159 @@ export function App() {
   useEffect(() => {
     void bootstrap(true);
   }, []);
+
+  useEffect(() => {
+    void getVersion()
+      .then((version) => setAppVersion(version))
+      .catch(() => {
+        /* La versión mostrada es solo informativa. */
+      });
+
+    let unlisten: (() => void) | undefined;
+    void listen<UpdateProgress>('atlas-update-progress', (event) => {
+      setUpdateProgress(Math.round(event.payload.percent));
+    })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {
+        /* Sin listener el modal sigue funcionando sin barra de progreso. */
+      });
+
+    let unlistenMetadata: (() => void) | undefined;
+    void listen<MetadataProgress>('atlas-metadata-progress', (event) => {
+      const progress = event.payload;
+      setMetadataProgress(progress);
+      setStatus(
+        `DESCARGANDO METADATOS ${progress.processed}/${progress.total} · ${progress.name}${
+          progress.error ? ' · error' : ''
+        }`,
+      );
+
+      // Si se obtuvo portada para un juego, actualizarlo en el estado de la biblioteca en vivo
+      if (progress.cover_path) {
+        setGames((prev) =>
+          prev.map((g) =>
+            g.id === progress.game_id
+              ? { ...g, cover_path: progress.cover_path ?? g.cover_path }
+              : g,
+          ),
+        );
+      }
+    })
+      .then((stop) => {
+        unlistenMetadata = stop;
+      })
+      .catch(() => {
+        /* La descarga masiva también funciona sin barra de progreso. */
+      });
+
+    return () => {
+      unlisten?.();
+      unlistenMetadata?.();
+    };
+  }, []);
+
+  // Cambia entre modo ventana y modo Big Picture (pantalla completa).
+  async function applyFullscreen(enabled: boolean) {
+    try {
+      const state = await invokeCmd<boolean>('set_fullscreen', { enabled });
+      setIsFullscreen(state);
+      setStatus(
+        state
+          ? 'MODO BIG PICTURE · F11 O ESC PARA VOLVER'
+          : 'MODO VENTANA · F11 PARA BIG PICTURE',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`ERROR CAMBIANDO DE MODO: ${message}`);
+    }
+  }
+
+  // Atajos: F11 alterna Big Picture y Esc vuelve al modo ventana.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'F11') {
+        event.preventDefault();
+        void applyFullscreen(!isFullscreen);
+      } else if (event.key === 'Escape' && isFullscreen) {
+        event.preventDefault();
+        void applyFullscreen(false);
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
+
+  async function handleCheckUpdate() {
+    setCheckingUpdate(true);
+    setUpdateError(null);
+    try {
+      const info = await invokeCmd<UpdateInfo>('check_update');
+      setUpdateInfo(info);
+      setIsUpdateModalOpen(true);
+      setStatus(
+        info.available
+          ? `ACTUALIZACIÓN DISPONIBLE: v${info.latest_version}`
+          : `ATLAS LAUNCHER v${info.current_version} ESTÁ ACTUALIZADO`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateInfo(null);
+      setUpdateError(message);
+      setIsUpdateModalOpen(true);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!updateInfo?.download_url || !updateInfo.asset_name) return;
+
+    setInstallingUpdate(true);
+    setUpdateError(null);
+    setUpdateProgress(0);
+    try {
+      await invokeCmd<string>('install_update', {
+        downloadUrl: updateInfo.download_url,
+        assetName: updateInfo.asset_name,
+        expectedDigest: updateInfo.digest ?? null,
+      });
+      setStatus('DESCARGANDO ACTUALIZACIÓN...');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateError(message);
+      setInstallingUpdate(false);
+    }
+  }
+
+  async function handleFetchCovers() {
+    setFetchingCovers(true);
+    setMetadataProgress(null);
+    setStatus('BUSCANDO PORTADAS FALTANTES...');
+    try {
+      const result = await invokeCmd<MetadataBulkResult>('fetch_missing_covers', { limit: 12 });
+      const list = await invokeCmd<Game[]>('list_games');
+      setGames(list);
+
+      if (result.total === 0) {
+        setStatus('TODAS LAS PORTADAS YA ESTÁN DESCARGADAS');
+      } else {
+        setStatus(
+          `PORTADAS: ${result.updated} ACTUALIZADAS · ${result.failed} CON ERROR${
+            result.failed > 0 ? ' (revisa las claves o los nombres)' : ''
+          }`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`ERROR DESCARGANDO PORTADAS: ${message}`);
+    } finally {
+      setFetchingCovers(false);
+      setMetadataProgress(null);
+    }
+  }
 
   async function bootstrap(scanOnStart: boolean) {
     setLoading(true);
@@ -721,21 +1673,25 @@ export function App() {
   ];
 
   return (
-    <div className="flex min-h-screen flex-col bg-atlas-dark font-pixel text-white">
+    <div className={`flex h-screen flex-col overflow-hidden font-pixel transition-colors duration-200 ${
+      theme === 'light' ? 'bg-[#181824] text-gray-100' : 'bg-atlas-dark text-white'
+    }`}>
       {/* Barra superior */}
       <header className="sticky top-0 z-40 border-b border-gray-800 bg-black/70 backdrop-blur">
-        <div className="flex items-center justify-between gap-4 px-6 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div className="flex items-center gap-3">
             <img src="/icon.png" alt="Atlas Logo" className="h-9 w-9 rounded-md object-contain" />
             <div>
               <h1 className="text-2xl font-bold uppercase tracking-[0.2em] text-neon-pink">
                 Atlas Launcher
               </h1>
-              <p className="font-mono text-[10px] uppercase tracking-widest text-gray-500">
+              <p className="font-mono text-[10px] uppercase tracking-widest text-gray-300">
                 Sostiene tu mundo de videojuegos
               </p>
             </div>
-            <span className="mt-1 self-start font-mono text-[10px] text-gray-600">v1.0.0</span>
+            <span className="mt-1 self-start font-mono text-[10px] text-gray-400">
+              v{appVersion}
+            </span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -747,17 +1703,27 @@ export function App() {
                 placeholder="Buscar juegos o sagas..."
                 className="atlas-input w-64 text-xs"
               />
-              <Search className="absolute right-3 top-2.5 h-4 w-4 text-gray-500" />
+              <Search className="absolute right-3 top-2.5 h-4 w-4 text-gray-300" />
             </div>
+
+            <button
+              type="button"
+              onClick={() => setIsGeneralSettingsOpen(true)}
+              className="flex items-center gap-1.5 rounded border border-neon-cyan/50 bg-gray-900/80 px-3 py-2 font-mono text-xs text-neon-cyan hover:bg-neon-cyan/20 hover:text-white"
+              title={lang === 'es' ? 'Configuración general del Launcher' : 'Launcher general settings'}
+            >
+              <Settings className="h-4 w-4" />
+              {lang === 'es' ? 'CONFIGURACIÓN' : 'SETTINGS'}
+            </button>
 
             <button
               type="button"
               onClick={() => setIsAddModalOpen(true)}
               className="flex items-center gap-1.5 rounded border border-gray-700 bg-gray-900/80 px-3 py-2 font-mono text-xs text-gray-300 hover:border-gray-500 hover:text-white"
-              title="Añadir juego manualmente"
+              title={lang === 'es' ? 'Añadir juego manualmente' : 'Add game manually'}
             >
               <Plus className="h-4 w-4 text-neon-cyan" />
-              Añadir
+              {lang === 'es' ? 'AÑADIR' : 'ADD'}
             </button>
 
             <button
@@ -767,7 +1733,7 @@ export function App() {
               className="atlas-btn-cyan flex items-center px-4 py-2 text-xs disabled:opacity-50"
             >
               <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              ESCANEAR
+              {lang === 'es' ? 'ESCANEAR' : 'SCAN'}
             </button>
           </div>
         </div>
@@ -775,8 +1741,8 @@ export function App() {
 
       <div className="flex min-h-0 flex-1">
         {/* Barra lateral */}
-        <aside className="w-64 shrink-0 border-r border-gray-800 bg-atlas-panel">
-          <div className="flex h-full flex-col p-5">
+        <aside className="scrollbar-hide w-64 shrink-0 overflow-y-auto border-r border-gray-800 bg-atlas-panel">
+          <div className="flex min-h-full flex-col p-5">
             <h2 className="mb-3 font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-neon-cyan">
               Biblioteca
             </h2>
@@ -794,7 +1760,7 @@ export function App() {
                     className={`flex w-full items-center justify-between rounded px-3 py-2 font-mono text-xs transition-colors ${
                       active
                         ? 'bg-neon-pink text-black font-bold'
-                        : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
+                        : 'text-gray-200 hover:bg-gray-800/80 hover:text-white font-medium'
                     }`}
                   >
                     <div className="flex items-center gap-2">
@@ -802,9 +1768,9 @@ export function App() {
                         className="h-2 w-2 rounded-full"
                         style={{ backgroundColor: platform.color }}
                       />
-                      <span>{platform.name}</span>
+                      <span className="text-gray-100">{platform.name}</span>
                     </div>
-                    <span className={active ? 'text-black/70' : 'text-gray-600'}>
+                    <span className={active ? 'text-black font-bold' : 'text-gray-400 font-mono text-[11px]'}>
                       {platform.count}
                     </span>
                   </button>
@@ -827,24 +1793,61 @@ export function App() {
                     }}
                     className={`flex w-full items-center justify-between rounded px-3 py-1.5 font-mono text-xs transition-colors ${
                       active
-                        ? 'bg-neon-cyan text-black'
-                        : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
+                        ? 'bg-neon-cyan text-black font-bold'
+                        : 'text-gray-200 hover:bg-gray-800/80 hover:text-white font-medium'
                     }`}
                   >
-                    <span className="truncate">{saga.name}</span>
-                    <span className={active ? 'text-black/70' : 'text-gray-600'}>
+                    <span className="truncate text-gray-100">{saga.name}</span>
+                    <span className={active ? 'text-black font-bold' : 'text-gray-400 font-mono text-[11px]'}>
                       {saga.games.length}
                     </span>
                   </button>
                 );
               })}
               {sagas.length === 0 && (
-                <p className="px-3 font-mono text-[10px] text-gray-600">Sin sagas detectadas</p>
+                <p className="px-3 font-mono text-[10px] text-gray-400">Sin sagas detectadas</p>
               )}
             </div>
 
             <div className="mt-auto border-t border-gray-800 pt-4">
-              <div className="flex items-start gap-2 font-mono text-[10px] leading-relaxed text-gray-500">
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => void applyFullscreen(!isFullscreen)}
+                  className={`flex w-full items-center justify-center gap-2 rounded border px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                    isFullscreen
+                      ? 'border-[#00ffff] bg-[#00ffff]/15 text-[#00ffff] hover:bg-[#00ffff]/25'
+                      : 'border-gray-700 bg-gray-900/80 text-gray-300 hover:border-gray-500 hover:text-white'
+                  }`}
+                  title="Pantalla completa sin bordes (F11)"
+                >
+                  {isFullscreen ? (
+                    <Minimize2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <Maximize2 className="h-3.5 w-3.5 text-neon-cyan" />
+                  )}
+                  {isFullscreen ? 'Salir de Big Picture' : 'Modo Big Picture'}
+                </button>
+                {fetchingCovers && (
+                  <div className="flex w-full items-center justify-center gap-2 rounded border border-neon-cyan/40 bg-neon-cyan/10 px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-neon-cyan">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-neon-cyan" />
+                    <span>
+                      {`Descargando metadatos ${metadataProgress?.processed ?? 0}/${metadataProgress?.total ?? 0}`}
+                    </span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="flex w-full items-center justify-center gap-2 rounded border border-gray-700 bg-gray-900/80 px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-gray-300 hover:border-gray-500 hover:text-white"
+                  title="Configurar claves de IGDB y SteamGridDB"
+                >
+                  <Settings className="h-3.5 w-3.5 text-neon-cyan" />
+                  Ajustes de metadatos (APIs)
+                </button>
+              </div>
+
+              <div className="mt-3 flex items-start gap-2 font-mono text-[10px] leading-relaxed text-gray-300">
                 <Cpu className="mt-0.5 h-4 w-4 shrink-0" />
                 <span className="break-words">{status}</span>
               </div>
@@ -866,7 +1869,7 @@ export function App() {
                         ? 'Biblioteca'
                         : 'Catálogo'}
                 </h2>
-                <p className="mt-1 font-mono text-xs text-gray-500">
+                <p className="mt-1 font-mono text-xs text-gray-300">
                   {filteredGames.length} juego{filteredGames.length === 1 ? '' : 's'}
                   {activeSaga ? ` · saga ${activeSaga}` : ''}
                 </p>
@@ -929,14 +1932,14 @@ export function App() {
                           <h3 className="line-clamp-1 text-xs font-bold text-white group-hover:text-neon-pink">
                             {game.name}
                           </h3>
-                          <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-gray-500">
-                            <span style={{ color: accent }}>
+                          <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-gray-200">
+                            <span style={{ color: accent }} className="font-semibold">
                               {PLATFORM_LABELS[game.platform] || game.platform}
                             </span>
-                            <span>{game.release_year ?? '—'}</span>
+                            <span className="text-gray-300 font-medium">{game.release_year ?? '—'}</span>
                           </div>
                           {game.play_time_minutes > 0 && (
-                            <p className="mt-1 font-mono text-[9px] text-gray-400">
+                            <p className="mt-1 font-mono text-[9px] text-gray-300">
                               Jugado: {formatPlaytime(game.play_time_minutes)}
                             </p>
                           )}
@@ -1027,7 +2030,7 @@ export function App() {
                     <div className="mb-3 flex items-center gap-2">
                       <Sparkles className="h-4 w-4 text-neon-cyan" />
                       <h3 className="text-lg font-bold text-white">{saga.name}</h3>
-                      <span className="ml-auto font-mono text-[11px] text-gray-500">
+                      <span className="ml-auto font-mono text-[11px] text-gray-300">
                         {saga.games.length}
                       </span>
                     </div>
@@ -1044,7 +2047,7 @@ export function App() {
                             <p className="mt-1 line-clamp-1 text-[10px] text-gray-300">
                               {game.name}
                             </p>
-                            <p className="font-mono text-[9px] text-gray-500">
+                            <p className="font-mono text-[9px] text-gray-300">
                               {game.release_year ?? '—'}
                             </p>
                           </button>
@@ -1081,6 +2084,9 @@ export function App() {
         onDelete={(id) => {
           setGames((prev) => prev.filter((g) => g.id !== id));
         }}
+        onMetadataFetched={(id, changes) => {
+          setGames((prev) => prev.map((g) => (g.id === id ? { ...g, ...changes } : g)));
+        }}
       />
 
       <AddGameModal
@@ -1089,6 +2095,35 @@ export function App() {
         onAdded={() => {
           void bootstrap(false);
         }}
+      />
+
+      <MetadataSettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+
+      <GeneralSettingsModal
+        isOpen={isGeneralSettingsOpen}
+        onClose={() => setIsGeneralSettingsOpen(false)}
+        lang={lang}
+        setLang={setLang}
+        theme={theme}
+        setTheme={setTheme}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={() => void applyFullscreen(!isFullscreen)}
+        onResizeWindow={(w, h) => void handleResizeWindow(w, h)}
+        onOpenMetadataSettings={() => setIsSettingsOpen(true)}
+        onCheckUpdate={() => void handleCheckUpdate()}
+        checkingUpdate={checkingUpdate}
+        updateAvailable={updateInfo?.available}
+      />
+
+      <UpdateModal
+        isOpen={isUpdateModalOpen}
+        info={updateInfo}
+        error={updateError}
+        installing={installingUpdate}
+        progress={updateProgress}
+        onClose={() => setIsUpdateModalOpen(false)}
+        onInstall={() => void handleInstallUpdate()}
+        onRetry={() => void handleCheckUpdate()}
       />
     </div>
   );

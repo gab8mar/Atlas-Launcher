@@ -27,6 +27,7 @@ pub struct DetectedGame {
     pub saga: Option<String>,
     pub console: Option<String>,
     pub release_year: Option<i32>,
+    pub cover_path: Option<String>,
 }
 
 impl DetectedGame {
@@ -39,6 +40,7 @@ impl DetectedGame {
             saga: None,
             console: Some("PC".to_string()),
             release_year: None,
+            cover_path: None,
         }
     }
 }
@@ -107,6 +109,41 @@ impl SteamScanner {
         // Lanzar mediante el protocolo oficial de Steam evita problemas de DRM/overlay.
         game.executable_path = Some(format!("steam://rungameid/{}", appid));
         game.console = Some("PC".to_string());
+
+        // Si Steam ya tiene la carátula oficial en su caché local (librarycache), vincularla directamente
+        let steam_roots = steamapps_directories();
+        for root in steam_roots {
+            // El root puede ser C:\...\Steam o C:\...\Steam\steamapps
+            let steam_dir = if root.ends_with("steamapps") {
+                root.parent().unwrap_or(&root).to_path_buf()
+            } else {
+                root
+            };
+            let cache_candidates = [
+                steam_dir.join("appcache").join("librarycache").join(&appid).join("library_600x900.jpg"),
+                steam_dir.join("appcache").join("librarycache").join(&appid).join("header.jpg"),
+                steam_dir.join("appcache").join("librarycache").join(format!("{}_library_600x900.jpg", appid)),
+                steam_dir.join("appcache").join("librarycache").join(format!("{}_header.jpg", appid)),
+            ];
+            for candidate in cache_candidates {
+                if candidate.exists() {
+                    game.cover_path = Some(candidate.to_string_lossy().to_string());
+                    break;
+                }
+            }
+            if game.cover_path.is_some() {
+                break;
+            }
+        }
+
+        // Si no está en caché local, usar la CDN pública oficial de Steam (library_600x900)
+        if game.cover_path.is_none() {
+            game.cover_path = Some(format!(
+                "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg",
+                appid
+            ));
+        }
+
         let _ = install_path;
 
         Some(game)
